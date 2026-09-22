@@ -1,0 +1,150 @@
+name: Client native release builds
+# Vive aca y no en Matisilvac/otera porque ese repo es privado y Actions le
+# cobra los minutos (Windows al doble); en un repo publico los runners
+# estandar son gratis. Solo compila OTClient 4.1 mas el parche de client/patches:
+# el datapack y el servidor no pasan por aca.
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Que compilar
+        type: choice
+        default: windows
+        options: [windows, linux, both]
+permissions:
+  contents: read
+jobs:
+  native:
+    name: Native ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.platform == 'windows' && '[{"platform":"windows","runner":"windows-2025-vs2026"}]' || inputs.platform == 'linux' && '[{"platform":"linux","runner":"ubuntu-24.04"}]' || '[{"platform":"windows","runner":"windows-2025-vs2026"},{"platform":"linux","runner":"ubuntu-24.04"}]') }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/.vcpkg-cache
+      VCPKG_MAX_CONCURRENCY: 3
+    steps:
+      - name: Preserve source and patch line endings
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: opentibiabr/otclient
+          ref: dd5641492a71e966b96b8a91398b44bb3df67d88 # tag 4.1
+          path: otclient
+      - uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          ref: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # 4.1 manifest baseline
+          path: vcpkg
+      - uses: actions/cache/restore@v4
+        id: native-cache
+        with:
+          path: .vcpkg-cache
+          key: otera-native-${{ matrix.platform }}-cd61e1e-v1
+      - name: Normalize patch inputs
+        shell: bash
+        run: |
+          python - <<'PYTHON'
+          from pathlib import Path
+          import hashlib
+          for name in ['client/patches/otclient-4.1-autowalk.patch', 'otclient/src/client/localplayer.cpp']:
+              path = Path(name)
+              data = path.read_bytes()
+              print(name, 'CRLF count:', data.count(b'\r\n'))
+              path.write_bytes(data.replace(b'\r\n', b'\n'))
+              print('SHA256:', hashlib.sha256(path.read_bytes()).hexdigest())
+          PYTHON
+      - name: Apply Otera patch
+        working-directory: otclient
+        run: git apply --check ../client/patches/otclient-4.1-autowalk.patch
+      - name: Patch sources
+        working-directory: otclient
+        run: git apply ../client/patches/otclient-4.1-autowalk.patch
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf autoconf-archive automake gcc-14 g++-14 libgl1-mesa-dev libglu1-mesa-dev libltdl-dev libtool libtool-bin libx11-dev libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev linux-libc-dev ninja-build pkg-config
+          mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
+          ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+      - name: Compile Linux
+        if: runner.os == 'Linux'
+        working-directory: otclient
+        env:
+          CC: gcc-14
+          CXX: g++-14
+        run: |
+          cmake --preset linux-release -DTOGGLE_BIN_FOLDER=ON -DOPTIONS_ENABLE_IPO=OFF -DOPTIONS_ENABLE_CCACHE=OFF -DOTCLIENT_BUILD_TESTS=OFF
+          cmake --build --preset linux-release --parallel 3
+          ldd build/linux-release/bin/otclient
+          build/linux-release/bin/otclient --help
+      - name: Configure Windows dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $buildJobs = [Math]::Max(1, [Math]::Min(3, [Environment]::ProcessorCount))
+          $env:VCPKG_MAX_CONCURRENCY = "$buildJobs"
+          "OTERA_BUILD_JOBS=$buildJobs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Windows build workers: $buildJobs; logical CPUs: $([Environment]::ProcessorCount)"
+          New-Item -ItemType Directory -Force $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          & ./vcpkg/bootstrap-vcpkg.bat -disableMetrics
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -prerelease -products '*' -version '[18.0,19.0)' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'Visual Studio 2026 C++ toolchain missing' }
+          $vcvars = Join-Path $vs 'VC/Auxiliary/Build/vcvars64.bat'
+          "OTERA_VCVARS=$vcvars" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          @"
+          @echo off
+          call "$vcvars"
+          if errorlevel 1 exit /b %errorlevel%
+          cd otclient
+          cmake --preset windows-release -DCMAKE_BUILD_TYPE=Release -DTOGGLE_BIN_FOLDER=ON -DOPTIONS_ENABLE_IPO=OFF -DOPTIONS_ENABLE_SCCACHE=OFF -DOTCLIENT_BUILD_TESTS=OFF
+          if errorlevel 1 exit /b %errorlevel%
+          exit /b %errorlevel%
+          "@ | Set-Content build-native.cmd
+          cmd /c build-native.cmd
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Save compiled dependencies
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .vcpkg-cache
+          key: otera-native-${{ matrix.platform }}-cd61e1e-v1
+      - name: Compile Windows OpenGL
+        if: runner.os == 'Windows'
+        shell: cmd
+        working-directory: otclient
+        run: |
+          call "%OTERA_VCVARS%"
+          if errorlevel 1 exit /b %errorlevel%
+          cmake --build --preset windows-release --parallel %OTERA_BUILD_JOBS%
+          exit /b %errorlevel%
+      - name: Check Windows executable startup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 2
+        working-directory: otclient
+        run: |
+          $process = Start-Process -FilePath './build/windows-release/bin/otclient.exe' -WorkingDirectory (Get-Location).Path -ArgumentList '--help' -PassThru -RedirectStandardOutput startup.log -RedirectStandardError startup-errors.log
+          if (-not $process.WaitForExit(30000)) {
+            $process.Kill()
+            throw 'Windows startup check exceeded 30 seconds'
+          }
+          Get-Content startup.log
+          Get-Content startup-errors.log
+          if ($process.ExitCode -ne 0) { throw "Windows startup check failed: $($process.ExitCode)" }
+      - name: Record binary and source provenance
+        shell: bash
+        run: |
+          python client/native/build_manifest.py --platform '${{ matrix.platform }}' --source otclient --output artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: otera-native-${{ matrix.platform }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30

@@ -1,0 +1,20 @@
+diff --git a/src/client/localplayer.cpp b/src/client/localplayer.cpp
+index 8ddb23bf5..1d2e875ab 100644
+--- a/src/client/localplayer.cpp
++++ b/src/client/localplayer.cpp
+@@ -205,9 +205,12 @@ bool LocalPlayer::autoWalk(const Position& destination, const bool retry)
+             return;
+         }
+ 
+-        if (self->m_autoWalkDestination != result->destination) {
+-            self->m_lastAutoWalkPosition = result->destination;
+-        }
++        // Continue at the endpoint of this protocol-sized chunk, not the
++        // final destination (which may still be hundreds of tiles away).
++        auto endpoint = result->start;
++        for (const auto direction : result->path)
++            endpoint = endpoint.translatedToDirection(direction);
++        self->m_lastAutoWalkPosition = endpoint;
+ 
+         g_game.autoWalk(result->path, result->start);
+     });

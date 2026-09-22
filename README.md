@@ -40,10 +40,14 @@ binario, con:
 - sin cavebot, sin tienda y sin los paneles que dependen de servicios de
   Tibia 12 que este servidor no tiene.
 
-Los binarios de Windows y Linux son los del
-[release 4.1 oficial](https://github.com/opentibiabr/otclient/releases/tag/4.1)
-de opentibiabr, tal cual. El de macOS esta compilado desde ese mismo tag, que
-upstream no publica.
+Desde Otera 1.9.0 los tres binarios se compilan desde el
+[tag 4.1](https://github.com/opentibiabr/otclient/releases/tag/4.1) de opentibiabr
+con un parche chico de autowalk, [`client/patches/otclient-4.1-autowalk.patch`](client/patches/otclient-4.1-autowalk.patch).
+Windows y Linux los compila el workflow
+[`client-native.yml`](.github/workflows/client-native.yml) de este repo, que
+deja `native-build.json` con el commit de origen, el hash del parche y el SHA256
+del ejecutable; el empaquetador del servidor verifica eso antes de aceptar cada
+binario. El de macOS se compila localmente desde el mismo tag y parche.
 
 ## Licencias
 
