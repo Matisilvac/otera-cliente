@@ -4,6 +4,8 @@ project(otera_updater CXX)
 # Dependencies come from vcpkg.json next to this file (baseline pinned to the
 # one the game binaries use). IXWebSocket is built on mbedTLS on every system,
 # so TLS always trusts the same pinned cacert.pem, not the OS store.
+# IXWebSocket links Threads::Threads on Linux without declaring the dependency.
+find_package(Threads REQUIRED)
 find_package(ixwebsocket CONFIG REQUIRED)
 find_package(MbedTLS CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
@@ -24,10 +26,13 @@ endif()
 if(WIN32)
   # No console window, static CRT: a single file that runs on a clean Windows.
   set_property(TARGET otera-updater PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
+  # Before any header: IXWebSocket includes windows.h, whose min/max macros
+  # break std::min.
+  target_compile_definitions(otera-updater PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   target_link_options(otera-updater PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup)
   target_link_libraries(otera-updater PRIVATE ws2_32 crypt32 bcrypt shlwapi)
 elseif(APPLE)
   target_link_libraries(otera-updater PRIVATE "-framework Security" "-framework CoreFoundation")
 else()
-  target_link_libraries(otera-updater PRIVATE pthread)
+  target_link_libraries(otera-updater PRIVATE Threads::Threads)
 endif()

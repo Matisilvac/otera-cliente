@@ -48,8 +48,7 @@
 #include <vector>
 
 #ifdef _WIN32
-#define NOMINMAX
-#include <windows.h>
+#include <windows.h> // NOMINMAX comes from CMakeLists.txt, ahead of every header
 #else
 #include <cerrno>
 #include <csignal>
