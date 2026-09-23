@@ -3,7 +3,7 @@
 El cliente para jugar en **[oteraot.com](https://oteraot.com)**, un servidor de
 Tibia 8.6 con el mapa real.
 
-Este repositorio no tiene codigo: existe para publicar las descargas.
+Este repositorio publica las descargas y compila los binarios nativos: el juego y el actualizador.
 
 ## Bajarlo
 
@@ -49,9 +49,30 @@ deja `native-build.json` con el commit de origen, el hash del parche y el SHA256
 del ejecutable; el empaquetador del servidor verifica eso antes de aceptar cada
 binario. El de macOS se compila localmente desde el mismo tag y parche.
 
+## Actualizaciones
+
+Desde Otera 1.10.0 el cliente se actualiza solo, ejecutable incluido: al abrirlo
+baja lo que cambio, se cierra, se reemplaza y vuelve a abrirse. Lo hace
+`bin/otera-updater`, cuyo codigo esta en [`client/native/updater`](client/native/updater):
+
+- cada release lleva `otera-release.json`, firmado con ECDSA P-256; la clave
+  publica ([`client/firma-actualizaciones.pub.pem`](client/firma-actualizaciones.pub.pem))
+  va compilada en el actualizador, que rechaza cualquier release que no este
+  firmado con ella;
+- solo se baja lo que cambio, con HTTP Range sobre los `otera-pack-*.bin` de
+  este y de releases anteriores (por eso no se borran releases viejos);
+- los archivos se reemplazan con copia de respaldo y journal: si algo falla,
+  vuelve la version anterior.
+
+El workflow [`client-updater.yml`](.github/workflows/client-updater.yml) lo
+compila para Windows y Linux y corre ahi [`tests/client_updater.py`](tests/client_updater.py),
+las pruebas de punta a punta contra un servidor HTTPS local.
+
 ## Licencias
 
-OTClient es MIT (ver el repositorio de upstream). Los archivos de graficos
+OTClient es MIT (ver el repositorio de upstream). El actualizador trae las
+licencias de lo que lleva adentro (IXWebSocket, mbedTLS, zlib, nlohmann-json) en
+`bin/otera-updater-licenses.txt`. Los archivos de graficos
 (`Tibia.spr`, `Tibia.dat`) son propiedad de CipSoft GmbH y no estan cubiertos
 por esa licencia: se incluyen para poder jugar, como hace cualquier cliente de
 Open Tibia. Otera no tiene relacion con CipSoft.
