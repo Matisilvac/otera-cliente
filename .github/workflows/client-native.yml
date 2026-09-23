@@ -81,6 +81,8 @@ jobs:
           git apply ../client/patches/security-tls.patch
           git apply --check ../client/patches/security-tls-probe.patch
           git apply ../client/patches/security-tls-probe.patch
+          git apply --check ../client/patches/security-tls-profile.patch
+          git apply ../client/patches/security-tls-profile.patch
       - name: Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -155,6 +157,7 @@ jobs:
           binary=otclient
           if [ '${{ matrix.platform }}' = windows ]; then binary=otclient.exe; fi
           python tests/security_client_transport.py --binary "otclient/build/${{ matrix.platform }}-release/bin/$binary" --source otclient --output tls-transport-result.json
+          python tests/security_client_transport.py --binary "otclient/build/${{ matrix.platform }}-release/bin/$binary" --source otclient --output profile-tls-result.json --profile-mode
       - name: Record binary and source provenance
         shell: bash
         run: |

@@ -23,7 +23,7 @@ def certificate(directory, name, openssl):
     return cert, key
 
 
-def run(binary, source, output):
+def run(binary, source, output, profile_mode=False):
     openssl = shutil.which('openssl')
     if not openssl:
         raise RuntimeError('OpenSSL CLI is required to create disposable test certificates')
@@ -32,6 +32,10 @@ def run(binary, source, output):
         directory = Path(temporary)
         cert, key = certificate(directory, 'server', openssl)
         other, _ = certificate(directory, 'other', openssl)
+        if profile_mode:
+            source = directory / 'profile-client'
+            source.mkdir(); (source / 'init.lua').write_text('-- headless profile test\n')
+            (source / 'connection').mkdir()
         for case in ('tls12', 'tls13', 'wrong-name', 'unknown-ca', 'plaintext', 'missing-ca'):
             listener = socket.socket()
             listener.bind(('127.0.0.1', 0))
@@ -80,6 +84,17 @@ def run(binary, source, output):
             if case == 'missing-ca':
                 env['OTERA_TLS_CA_FILE'] = str(directory / 'absent.crt')
             env.pop('OTERA_RSA_PUBLIC', None)
+            if profile_mode:
+                profile = {'format': 1, 'transport': 'tls-required',
+                           'server_name': env['OTERA_TLS_SERVER_NAME'], 'rsa_public': '1' + '0' * 308,
+                           'ca_file': 'connection/ca.crt'}
+                (source / 'connection/profile.json').write_text(json.dumps(profile))
+                ca = source / 'connection/ca.crt'
+                ca.unlink(missing_ok=True)
+                if case != 'missing-ca': shutil.copyfile(env['OTERA_TLS_CA_FILE'], ca)
+                # Signed package configuration must win over inherited environment.
+                env['OTERA_TLS_SERVER_NAME'] = 'untrusted-environment.invalid'
+                env['OTERA_TLS_CA_FILE'] = str(directory / 'environment-missing.crt')
             result = subprocess.run([str(binary), f'--otera-tls-probe-port={port}'],
                                     cwd=source, env=env, capture_output=True, timeout=20)
             if case == 'missing-ca':
@@ -87,6 +102,7 @@ def run(binary, source, output):
                 listener.close()
             worker.join(timeout=16)
             expected = 0 if case in ('tls12', 'tls13') else 2
+            if profile_mode and case == 'missing-ca': expected = 6
             valid = result.returncode == expected and not worker.is_alive()
             if expected == 0:
                 valid &= observed['application_bytes'] == len(PAYLOAD)
@@ -104,6 +120,7 @@ def run(binary, source, output):
                 break
     record = {'passed': len(report) == 6 and all(r['passed'] for r in report),
               'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest(), 'cases': report,
+              'profile_mode': profile_mode,
               'scope': 'native Connection TLS and encrypted bidirectional I/O; not full game/GUI QA'}
     output.write_text(json.dumps(record, indent=2) + '\n')
     if not record['passed']:
@@ -115,5 +132,6 @@ if __name__ == '__main__':
     parser.add_argument('--binary', required=True, type=Path)
     parser.add_argument('--source', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--profile-mode', action='store_true')
     args = parser.parse_args()
-    run(args.binary.resolve(), args.source.resolve(), args.output.resolve())
+    run(args.binary.resolve(), args.source.resolve(), args.output.resolve(), args.profile_mode)
