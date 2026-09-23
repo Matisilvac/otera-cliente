@@ -44,6 +44,17 @@ def main():
     shutil.copy2('profile-tls-result.json', args.output / 'profile-tls-result.json')
     manifest = dict(tls_patches={p.name: digest(p) for p in tls_patches}, purpose='TLS rehearsal; not public release', platform=args.platform, source=revision, patch_sha256=digest(PATCH),
                     binary=name, sha256=digest(binary))
+    statuses=list((args.source/'build'/(args.platform+'-release')).rglob('vcpkg/status'))
+    if len(statuses)!=1: raise SystemExit('Expected one installed dependency status file')
+    dependencies=[]
+    for block in statuses[0].read_text().split('\n\n'):
+        record=dict(line.split(': ',1) for line in block.splitlines() if ': ' in line)
+        if 'Package' in record and not record.get('Feature'):
+            dependencies.append({'name':record['Package'],'version':record.get('Version'),'architecture':record.get('Architecture')})
+    if not any(d['name']=='openssl' and d['version']=='3.6.4' for d in dependencies):
+        raise SystemExit('OpenSSL security update is missing')
+    manifest['openssl_overlay']='960d40ee7351cca3fc648e9d38993b59f01dfd2b'
+    manifest['dependencies']=dependencies
     (args.output / 'native-build.json').write_text(json.dumps(manifest, indent=2) + '\n')
     print(json.dumps(manifest, indent=2))
 
