@@ -1,15 +1,22 @@
-name: Client native release builds
+name: Client native TLS rehearsal builds
 # Vive aca y no en Matisilvac/otera porque ese repo es privado y Actions le
 # cobra los minutos (Windows al doble); en un repo publico los runners
 # estandar son gratis. Solo compila OTClient 4.1 mas el parche de client/patches:
 # el datapack y el servidor no pasan por aca.
 on:
+  push:
+    branches: [codex/tls-client-hardening]
+    paths:
+      - .github/workflows/client-native.yml
+      - client/patches/security-tls*.patch
+      - client/native/build_manifest.py
+      - tests/security_client_transport.py
   workflow_dispatch:
     inputs:
       platform:
         description: Que compilar
         type: choice
-        default: windows
+        default: both
         options: [windows, linux, both]
 permissions:
   contents: read
@@ -29,18 +36,20 @@ jobs:
     steps:
       - name: Preserve source and patch line endings
         run: git config --global core.autocrlf false
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: opentibiabr/otclient
           ref: dd5641492a71e966b96b8a91398b44bb3df67d88 # tag 4.1
           path: otclient
-      - uses: actions/checkout@v4
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: microsoft/vcpkg
           ref: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # 4.1 manifest baseline
           path: vcpkg
-      - uses: actions/cache/restore@v4
+          persist-credentials: false
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         id: native-cache
         with:
           path: .vcpkg-cache
@@ -51,7 +60,7 @@ jobs:
           python - <<'PYTHON'
           from pathlib import Path
           import hashlib
-          for name in ['client/patches/otclient-4.1-autowalk.patch', 'otclient/src/client/localplayer.cpp']:
+          for name in ['client/patches/otclient-4.1-autowalk.patch', 'client/patches/security-tls.patch', 'client/patches/security-tls-probe.patch', 'otclient/src/client/localplayer.cpp', 'otclient/src/framework/net/connection.cpp', 'otclient/src/framework/net/connection.h', 'otclient/modules/gamelib/game.lua', 'otclient/src/main.cpp']:
               path = Path(name)
               data = path.read_bytes()
               print(name, 'CRLF count:', data.count(b'\r\n'))
@@ -64,6 +73,14 @@ jobs:
       - name: Patch sources
         working-directory: otclient
         run: git apply ../client/patches/otclient-4.1-autowalk.patch
+      - name: Apply verified TLS transport and native diagnostic
+        working-directory: otclient
+        shell: bash
+        run: |
+          git apply --check ../client/patches/security-tls.patch
+          git apply ../client/patches/security-tls.patch
+          git apply --check ../client/patches/security-tls-probe.patch
+          git apply ../client/patches/security-tls-probe.patch
       - name: Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -109,12 +126,6 @@ jobs:
           "@ | Set-Content build-native.cmd
           cmd /c build-native.cmd
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-      - name: Save compiled dependencies
-        if: steps.native-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: .vcpkg-cache
-          key: otera-native-${{ matrix.platform }}-cd61e1e-v1
       - name: Compile Windows OpenGL
         if: runner.os == 'Windows'
         shell: cmd
@@ -138,13 +149,19 @@ jobs:
           Get-Content startup.log
           Get-Content startup-errors.log
           if ($process.ExitCode -ne 0) { throw "Windows startup check failed: $($process.ExitCode)" }
+      - name: Test real native TLS transport
+        shell: bash
+        run: |
+          binary=otclient
+          if [ '${{ matrix.platform }}' = windows ]; then binary=otclient.exe; fi
+          python tests/security_client_transport.py --binary "otclient/build/${{ matrix.platform }}-release/bin/$binary" --source otclient --output tls-transport-result.json
       - name: Record binary and source provenance
         shell: bash
         run: |
           python client/native/build_manifest.py --platform '${{ matrix.platform }}' --source otclient --output artifacts
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: otera-native-${{ matrix.platform }}
+          name: otera-tls-rehearsal-${{ matrix.platform }}
           path: artifacts/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3

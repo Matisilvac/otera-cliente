@@ -1,0 +1,179 @@
+--- a/src/framework/net/connection.h
++++ b/src/framework/net/connection.h
+@@ -69,6 +69,7 @@
+     void internal_write();
+     void onResolve(const std::error_code& error, const asio::ip::tcp::resolver::iterator& endpointIterator);
+     void onConnect(const std::error_code& error);
++    void finishConnect(const std::error_code& error);
+     void onCanWrite(const std::error_code& error);
+     void onWrite(const std::error_code& error, size_t writeSize, const std::shared_ptr<asio::streambuf>&
+                  outputStream);
+@@ -85,6 +86,8 @@
+     asio::basic_waitable_timer<std::chrono::high_resolution_clock> m_delayedWriteTimer;
+     asio::ip::tcp::resolver m_resolver;
+     asio::ip::tcp::socket m_socket;
++    std::unique_ptr<asio::ssl::context> m_tlsContext;
++    std::unique_ptr<asio::ssl::stream<asio::ip::tcp::socket&>> m_tls;
+ 
+     static std::list<std::shared_ptr<asio::streambuf>> m_outputStreams;
+     std::shared_ptr<asio::streambuf> m_outputStream;
+--- a/src/framework/net/connection.cpp
++++ b/src/framework/net/connection.cpp
+@@ -22,6 +22,7 @@
+ #ifndef __EMSCRIPTEN__
+ 
+ #include "connection.h"
++#include <cstdlib>
+ 
+ #include "framework/util/stats.h"
+ #include "framework/core/graphicalapplication.h"
+@@ -93,6 +94,29 @@
+     m_connecting = true;
+     m_error.clear();
+     m_connectCallback = connectCallback;
++
++    // Explicit transport configuration applies to BOTH login and the advertised game IP.
++    // No automatic fallback to plaintext when TLS is requested or verification fails.
++    if (const char* serverName = std::getenv("OTERA_TLS_SERVER_NAME")) {
++        try {
++            if (!*serverName) { handleError(asio::error::invalid_argument); return; }
++            m_tlsContext = std::make_unique<asio::ssl::context>(asio::ssl::context::tls_client);
++            if (SSL_CTX_set_min_proto_version(m_tlsContext->native_handle(), TLS1_2_VERSION) != 1) {
++                handleError(asio::error::invalid_argument); return;
++            }
++            m_tlsContext->set_default_verify_paths();
++            if (const char* ca = std::getenv("OTERA_TLS_CA_FILE")) m_tlsContext->load_verify_file(ca);
++            m_tls = std::make_unique<asio::ssl::stream<asio::ip::tcp::socket&>>(m_socket, *m_tlsContext);
++            m_tls->set_verify_mode(asio::ssl::verify_peer);
++            m_tls->set_verify_callback(asio::ssl::host_name_verification(serverName));
++            if (SSL_set_tlsext_host_name(m_tls->native_handle(), serverName) != 1) {
++                handleError(asio::error::invalid_argument); return;
++            }
++        } catch (const std::exception&) {
++            handleError(asio::error::invalid_argument);
++            return;
++        }
++    }
+ 
+     const asio::ip::tcp::resolver::query query(host.data(), stdext::unsafe_cast<std::string>(port));
+     m_resolver.async_resolve(query, [this](auto&& error, auto&& endpointIterator) {
+@@ -152,11 +176,11 @@
+     std::shared_ptr<asio::streambuf> outputStream = m_outputStream;
+     m_outputStream = nullptr;
+ 
+-    async_write(m_socket,
+-                *outputStream,
+-                [capture0 = asConnection(), outputStream](auto&& PH1, auto&& PH2) {
+-        capture0->onWrite(std::forward<decltype(PH1)>(PH1), std::forward<decltype(PH2)>(PH2), outputStream);
+-    });
++    auto handler = [self = asConnection(), outputStream](const std::error_code& error, size_t size) {
++        self->onWrite(error, size, outputStream);
++    };
++    if (m_tls) asio::async_write(*m_tls, *outputStream, handler);
++    else asio::async_write(m_socket, *outputStream, handler);
+ 
+     m_writeTimer.cancel();
+     m_writeTimer.expires_from_now(asio::chrono::seconds(static_cast<uint32_t>(WRITE_TIMEOUT)));
+@@ -172,11 +196,9 @@
+ 
+     m_recvCallback = callback;
+ 
+-    async_read(m_socket,
+-               m_inputStream.prepare(bytes),
+-               [capture0 = asConnection()](auto&& PH1, auto&& PH2) {
+-        capture0->onRecv(std::forward<decltype(PH1)>(PH1), std::forward<decltype(PH2)>(PH2));
+-    });
++    auto handler = [self = asConnection()](const std::error_code& error, size_t size) { self->onRecv(error, size); };
++    if (m_tls) asio::async_read(*m_tls, m_inputStream.prepare(bytes), handler);
++    else asio::async_read(m_socket, m_inputStream.prepare(bytes), handler);
+ 
+     m_readTimer.cancel();
+     m_readTimer.expires_from_now(asio::chrono::seconds(static_cast<uint32_t>(READ_TIMEOUT)));
+@@ -192,12 +214,9 @@
+ 
+     m_recvCallback = callback;
+ 
+-    async_read_until(m_socket,
+-                     m_inputStream,
+-                     what,
+-                     [capture0 = asConnection()](auto&& PH1, auto&& PH2) {
+-        capture0->onRecv(std::forward<decltype(PH1)>(PH1), std::forward<decltype(PH2)>(PH2));
+-    });
++    auto handler = [self = asConnection()](const std::error_code& error, size_t size) { self->onRecv(error, size); };
++    if (m_tls) asio::async_read_until(*m_tls, m_inputStream, what, handler);
++    else asio::async_read_until(m_socket, m_inputStream, what, handler);
+ 
+     m_readTimer.cancel();
+     m_readTimer.expires_from_now(asio::chrono::seconds(static_cast<uint32_t>(READ_TIMEOUT)));
+@@ -213,10 +232,9 @@
+ 
+     m_recvCallback = callback;
+ 
+-    m_socket.async_read_some(m_inputStream.prepare(RECV_BUFFER_SIZE),
+-                             [capture0 = asConnection()](auto&& PH1, auto&& PH2) {
+-        capture0->onRecv(std::forward<decltype(PH1)>(PH1), std::forward<decltype(PH2)>(PH2));
+-    });
++    auto handler = [self = asConnection()](const std::error_code& error, size_t size) { self->onRecv(error, size); };
++    if (m_tls) m_tls->async_read_some(m_inputStream.prepare(RECV_BUFFER_SIZE), handler);
++    else m_socket.async_read_some(m_inputStream.prepare(RECV_BUFFER_SIZE), handler);
+ 
+     m_readTimer.cancel();
+     m_readTimer.expires_from_now(asio::chrono::seconds(static_cast<uint32_t>(READ_TIMEOUT)));
+@@ -241,25 +259,24 @@
+ 
+ void Connection::onConnect(const std::error_code& error)
+ {
+-    m_readTimer.cancel();
++    if (error || !m_tls) { finishConnect(error); return; }
++    if (!m_connecting) return;
++    m_readTimer.expires_after(std::chrono::seconds(10));
++    m_readTimer.async_wait([self = asConnection()](const std::error_code& err) { self->onTimeout(err); });
++    m_tls->async_handshake(asio::ssl::stream_base::client,
++        [self = asConnection()](const std::error_code& err) { self->finishConnect(err); });
++}
++
++void Connection::finishConnect(const std::error_code& error)
++{
++    m_readTimer.cancel();
++    if (error == asio::error::operation_aborted || !m_connecting) return;
++    if (error) { handleError(error); return; }
+     m_activityTimer.restart();
+-
+-    if (error == asio::error::operation_aborted)
+-        return;
+-
+-    if (!error) {
+-        m_connected = true;
+-
+-        // disable nagle's algorithm, this make the game play smoother
+-        const asio::ip::tcp::no_delay option(true);
+-        m_socket.set_option(option);
+-
+-        if (m_connectCallback)
+-            m_connectCallback();
+-    } else
+-        handleError(error);
+-
++    m_connected = true;
+     m_connecting = false;
++    m_socket.set_option(asio::ip::tcp::no_delay(true));
++    if (m_connectCallback) m_connectCallback();
+ }
+ 
+ void Connection::onCanWrite(const std::error_code& error)
+--- a/modules/gamelib/game.lua
++++ b/modules/gamelib/game.lua
+@@ -103,7 +103,12 @@
+     return clients[client] or client
+ end
+ 
+-if not G.currentRsa then
++local releaseRsa = os.getenv('OTERA_RSA_PUBLIC')
++if releaseRsa then
++    assert(os.getenv('OTERA_TLS_SERVER_NAME'), 'Release RSA requires verified TLS')
++    assert(#releaseRsa >= 300 and #releaseRsa <= 309 and releaseRsa:match('^%d+$'), 'Invalid release RSA')
++    g_game.setRsa(releaseRsa)
++elseif not G.currentRsa then
+     g_game.setRsa(OTSERV_RSA)
+ end
+ 
