@@ -1,0 +1,80 @@
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -20,6 +20,9 @@
+  * THE SOFTWARE.
+  */
+ 
++#ifndef __EMSCRIPTEN__
++#include "framework/net/oteraprofile.h"
++#endif
+ #include "client/client.h"
+ #include "client/gameconfig.h"
+ #include "framework/core/graphicalapplication.h"
+@@ -195,6 +198,17 @@
+         g_logger.fatal("Unable to find work directory, the application cannot be initialized.");
+     ALOGD("main: work dir found: %s", g_resources.getWorkDir().c_str());
+ 
++#ifndef __EMSCRIPTEN__
++    try {
++        const bool loaded = loadOteraProfile(g_resources.getWorkDir());
++        if (std::find(args.begin(), args.end(), "--otera-profile-check") != args.end())
++            return loaded ? 0 : 6;
++    } catch (const std::exception&) {
++        std::cerr << "Invalid Otera TLS profile; credentials were not loaded." << std::endl;
++        return 6;
++    }
++#endif
++
+     if (shouldShowHelp(args)) {
+         printHelp(args[0]);
+         return 0;
+--- /dev/null
++++ b/src/framework/net/oteraprofile.h
+@@ -0,0 +1,47 @@
++#pragma once
++
++#include <cstdlib>
++#include <filesystem>
++#include <fstream>
++#include <nlohmann/json.hpp>
++#include <openssl/ssl.h>
++#include <stdexcept>
++
++// Public, signed release metadata only. Read before Lua or stored credentials.
++inline bool loadOteraProfile(const std::string& workDir)
++{
++    namespace fs = std::filesystem;
++    const fs::path root(workDir), path = root / "connection/profile.json";
++    if (!fs::exists(path)) return false;
++    if (fs::is_symlink(path) || !fs::is_regular_file(path) || fs::file_size(path) > 4096)
++        throw std::runtime_error("Invalid Otera connection profile");
++    std::ifstream stream(path, std::ios::binary);
++    const auto profile = nlohmann::json::parse(stream);
++    const auto name = profile.at("server_name").get<std::string>();
++    const auto rsa = profile.at("rsa_public").get<std::string>();
++    if (profile.at("format") != 1 || profile.at("transport") != "tls-required" ||
++        name.empty() || name.size() > 253 ||
++        name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-") != std::string::npos ||
++        rsa.size() < 300 || rsa.size() > 309 || rsa.find_first_not_of("0123456789") != std::string::npos ||
++        profile.at("ca_file") != "connection/ca.crt")
++        throw std::runtime_error("Invalid Otera connection profile");
++    const auto ca = root / "connection/ca.crt";
++    if (fs::is_symlink(root / "connection") || fs::is_symlink(ca) || !fs::is_regular_file(ca) || fs::file_size(ca) > 32768)
++        throw std::runtime_error("Invalid Otera trust certificate");
++    SSL_CTX* context = SSL_CTX_new(TLS_client_method());
++    const bool valid = context && SSL_CTX_load_verify_locations(context, ca.string().c_str(), nullptr) == 1;
++    if (context) SSL_CTX_free(context);
++    if (!valid) throw std::runtime_error("Invalid Otera trust certificate");
++    auto set = [](const char* key, const std::string& value) {
++#ifdef _WIN32
++        if (_putenv_s(key, value.c_str()) != 0) throw std::runtime_error("Cannot configure Otera TLS");
++#else
++        if (setenv(key, value.c_str(), 1) != 0) throw std::runtime_error("Cannot configure Otera TLS");
++#endif
++    };
++    set("OTERA_TLS_SERVER_NAME", name);
++    set("OTERA_TLS_CA_FILE", fs::absolute(ca).string());
++    set("OTERA_RSA_PUBLIC", rsa);
++    set("OTERA_PROFILE_LOADED", "1");
++    return true;
++}

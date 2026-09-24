@@ -1,0 +1,69 @@
+diff --git a/src/main.cpp b/src/main.cpp
+index aa0b670..bbdc8a9 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -37,6 +37,11 @@
+ #endif
+ #include <iostream>
+ #include <ctime>
++#ifndef __EMSCRIPTEN__
++#include <framework/net/connection.h>
++#include <thread>
++#include <cstdlib>
++#endif
+ 
+ #ifndef ANDROID
+ #if ENABLE_DISCORD_RPC == 1
+@@ -56,6 +61,38 @@ extern "C" {
+ 
+ namespace {
+ 
++#ifndef __EMSCRIPTEN__
++// Headless transport diagnostic: synthetic bytes, loopback only, no Lua/account/assets.
++// This exercises the same Connection used by login and ProtocolGame on CI runners.
++int oteraTlsProbe(const std::string& value)
++{
++    if (value.empty() || value.size() > 5 || value.find_first_not_of("0123456789") != std::string::npos)
++        return 4;
++    const auto port = std::stoul(value);
++    if (port == 0 || port > 65535 || !std::getenv("OTERA_TLS_SERVER_NAME")) return 4;
++    auto connection = std::make_shared<Connection>();
++    int result = -1;
++    const std::string payload = "otera-tls-transport-probe-v1";
++    connection->setErrorCallback([&](const std::error_code&) { result = 2; });
++    connection->connect("127.0.0.1", static_cast<uint16_t>(port), [&] {
++        connection->write(reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
++        connection->read(static_cast<uint16_t>(payload.size()), [&](uint8_t* bytes, uint16_t size) {
++            result = std::string(reinterpret_cast<char*>(bytes), size) == payload ? 0 : 5;
++        });
++    });
++    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(12);
++    while (result < 0 && std::chrono::steady_clock::now() < deadline) {
++        Connection::poll();
++        std::this_thread::sleep_for(std::chrono::milliseconds(1));
++    }
++    connection->close();
++    Connection::poll();
++    if (result < 0) result = 3;
++    std::cout << "OTERA_TLS_PROBE result=" << result << std::endl;
++    return result;
++}
++#endif
++
+ bool shouldShowHelp(const std::vector<std::string>& args)
+ {
+     for (const auto& arg : args) {
+@@ -169,6 +206,13 @@ int main(const int argc, const char* argv[])
+     }
+ #endif
+ 
++#ifndef __EMSCRIPTEN__
++    for (const auto& arg : args) {
++        const std::string prefix = "--otera-tls-probe-port=";
++        if (arg.starts_with(prefix)) return oteraTlsProbe(arg.substr(prefix.size()));
++    }
++#endif
++
+     // initialize application framework and otclient
+     ALOGD("main: initializing app framework...");
+     const auto drawEvents = ApplicationDrawEventsPtr(&g_client, [](ApplicationDrawEvents*) {});
