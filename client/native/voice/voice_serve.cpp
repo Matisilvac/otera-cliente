@@ -6,8 +6,8 @@
 // 127.0.0.1, with a random port and token that it writes to <status.json>; the
 // client reads them and connects to ws://127.0.0.1:<port>/<token>. The token keeps
 // out anything else on the machine, a web page included: browsers can open
-// websockets to localhost, but cannot read the file. Requests with an Origin
-// header (browsers always send one; OTClient does not) are refused too.
+// websockets to localhost, but cannot read the file. Requests with a browser's
+// Origin are refused too (OTClient's IXWebSocket sends ws://127.0.0.1:<port>).
 //
 // Messages are JSON objects with a "t" field.
 //   client -> helper
@@ -39,6 +39,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -53,6 +54,21 @@ using namespace otera::voice;
 namespace {
 
 using Clock = std::chrono::steady_clock;
+
+// A short log next to the status file (.otera-voice/otera-voice.log): launched by
+// the game (on macOS through `open`) the helper has no console, and this is what a
+// player can send when the voice does not work. Rewritten on each start.
+std::ofstream g_log;
+std::mutex g_logMutex;
+
+void logLine(const std::string& text) {
+  std::lock_guard<std::mutex> lock(g_logMutex);
+  if (!g_log) return;
+  auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+  char stamp[32];
+  std::strftime(stamp, sizeof(stamp), "%H:%M:%S", std::localtime(&now));
+  g_log << stamp << "  " << text << std::endl;
+}
 
 struct Serve {
   std::mutex mutex;  // everything below, except what the engine and link guard themselves
@@ -122,9 +138,12 @@ void handle(Serve& s, const json& m) {
     });
     std::string error;
     if (!link->start(m.value("host", ""), uint16_t(m.value("port", 0)), m.value("id", 0u), key, error)) {
+      logLine("sesion: " + error);
       s.send({{"t", "error"}, {"code", "network"}, {"message", error}});
       return;
     }
+    logLine("sesion " + std::to_string(m.value("id", 0u)) + " con " + m.value("host", "") + ":" +
+            std::to_string(m.value("port", 0)));
     if (auto old = std::atomic_exchange(&s.link, link)) {
       old->stop();
       s.retired.push_back(old);
@@ -134,8 +153,11 @@ void handle(Serve& s, const json& m) {
     if (on != s.capture) {
       s.capture = on;
       std::string error;
-      if (!s.engine->configure(on, s.mic, s.out, error))
+      logLine(std::string("microfono ") + (on ? "abierto" : "cerrado"));
+      if (!s.engine->configure(on, s.mic, s.out, error)) {
+        logLine("audio: " + error);
         s.send({{"t", "error"}, {"code", "audio"}, {"message", error}});
+      }
     }
   } else if (t == "mute") {
     s.engine->setMuted(m.value("on", false));
@@ -179,6 +201,11 @@ int cmdServe(int argc, char** argv) {
     return 2;
   }
   std::string statusPath = argv[2];
+  {
+    std::error_code ignored;
+    std::filesystem::create_directories(pathOf(statusPath).parent_path(), ignored);
+    g_log.open(pathOf(statusPath).parent_path() / "otera-voice.log", std::ios::trunc);
+  }
   EngineOptions options;
   for (int i = 3; i < argc; ++i) {
     std::string a = argv[i];
@@ -227,21 +254,30 @@ int cmdServe(int argc, char** argv) {
   }
 
   server->setOnClientMessageCallback(
-      [&s, &token](std::shared_ptr<ix::ConnectionState>, ix::WebSocket& ws, const ix::WebSocketMessagePtr& msg) {
+      [&s, &token, port](std::shared_ptr<ix::ConnectionState>, ix::WebSocket& ws, const ix::WebSocketMessagePtr& msg) {
         bool reject = false;
         {
         std::lock_guard<std::mutex> lock(s.mutex);
         if (msg->type == ix::WebSocketMessageType::Open) {
-          bool browser = msg->openInfo.headers.count("Origin") > 0;
+          // IXWebSocket (OTClient) sends "Origin: ws://127.0.0.1:<port>" unless told
+          // otherwise; a browser sends the page's origin (http, https, file, null) and
+          // a page can never have a ws:// origin. Anything else is a web page.
+          auto origin = msg->openInfo.headers.find("Origin");
+          bool browser = origin != msg->openInfo.headers.end() &&
+                         origin->second != "ws://127.0.0.1:" + std::to_string(port);
           if (msg->openInfo.uri != "/" + token || browser || s.client) {
             reject = true;
+            logLine(std::string("conexion rechazada: ") +
+                    (browser ? "trae Origin" : s.client ? "ya hay un cliente" : "token equivocado"));
           } else {
+            logLine("cliente conectado");
             s.client = &ws;
             s.everConnected = true;
             s.lastSeen = Clock::now();
           }
         } else if (msg->type == ix::WebSocketMessageType::Close) {
           if (s.client == &ws) {
+            logLine("cliente desconectado: " + msg->closeInfo.reason);
             s.client = nullptr;
             s.lastSeen = Clock::now();
           }
@@ -260,6 +296,7 @@ int cmdServe(int argc, char** argv) {
         if (reject) ws.close();
       });
   server->start();
+  logLine("escuchando en 127.0.0.1:" + std::to_string(port));
   if (!writeStatus(statusPath, port, token)) {
     std::fprintf(stderr, "otera-voice: no se pudo escribir %s\n", statusPath.c_str());
     server->stop();
@@ -274,10 +311,16 @@ int cmdServe(int argc, char** argv) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     std::lock_guard<std::mutex> lock(s.mutex);
     auto now = Clock::now();
-    if (s.quit) break;
+    if (s.quit) {
+      logLine("salida: el cliente pidio quit");
+      break;
+    }
     if (!s.client) {
       auto idle = now - (s.everConnected ? s.lastSeen : started);
-      if (idle > std::chrono::seconds(s.everConnected ? 5 : 20)) break;
+      if (idle > std::chrono::seconds(s.everConnected ? 5 : 20)) {
+        logLine(s.everConnected ? "salida: el cliente se fue" : "salida: el cliente nunca se conecto");
+        break;
+      }
       continue;
     }
     auto status = s.engine->status();

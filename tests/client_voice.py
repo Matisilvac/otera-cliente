@@ -79,13 +79,15 @@ def serve_smoke(binary, work):
         if not status.exists():
             return
         info = json.loads(status.read_text())
-        with connect(f'ws://127.0.0.1:{info["port"]}/{info["token"]}') as ws:
+        # Como OTClient: IXWebSocket manda "Origin: ws://127.0.0.1:<puerto>".
+        with connect(f'ws://127.0.0.1:{info["port"]}/{info["token"]}',
+                     origin=f'ws://127.0.0.1:{info["port"]}') as ws:
             ws.send(json.dumps({'t': 'quit'}))
             try:
                 process.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 pass
-        check(process.poll() == 0, 'serve termina limpio con quit')
+        check(process.poll() == 0, 'serve acepta el handshake de OTClient y termina limpio con quit')
         check(not status.exists(), 'y borra su archivo de estado')
     finally:
         if process.poll() is None:
