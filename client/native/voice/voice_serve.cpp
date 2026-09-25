@@ -14,8 +14,8 @@
 //     session  {host, port, id, key}   the relay session from opcode 110
 //     capture  {on}                    open the mic (someone can hear the player)
 //     mute     {on}                    self-mute, the device stays open
-//     settings {sensitivity, volume, mic, out}
-//     pos      {c: {"<creature>": [dx, dy]}}   talkers on screen, in tiles
+//     settings {sensitivity, volume, mic, out, surround}
+//     pos      {c: {"<creature>": [dx, dy]}}   talkers on screen and the party, in tiles
 //     block    {id, on}                per-player mute
 //     devices  {}                      list mics and outputs
 //     quit     {}
@@ -164,6 +164,7 @@ void handle(Serve& s, const json& m) {
   } else if (t == "settings") {
     if (m.contains("sensitivity")) s.engine->setSensitivity(m["sensitivity"].get<float>());
     if (m.contains("volume")) s.engine->setVolume(m["volume"].get<float>());
+    if (m.contains("surround")) s.engine->setSurround(m["surround"].get<bool>());
     std::string mic = m.value("mic", s.mic), out = m.value("out", s.out);
     if (mic != s.mic || out != s.out) {
       s.mic = mic;

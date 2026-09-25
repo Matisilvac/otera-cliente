@@ -42,12 +42,16 @@ public:
   void setVolume(float value) { volume_ = value; }
   // Self-mute keeps the device open (no reopen lag) but sends nothing.
   void setMuted(bool muted) { muted_ = muted; }
+  // Off, every talker is centered (one earbud, a mono speaker); distance still
+  // lowers the volume.
+  void setSurround(bool surround) { surround_ = surround; }
 
   // Network thread.
   void onVoice(uint32_t creature, uint16_t seq, uint8_t flags, const uint8_t* opus, size_t size);
 
-  // Where each talker stands relative to the player, in tiles. Talkers not listed
-  // (a party member out of sight) are heard centered and a little lower.
+  // Where each talker stands relative to the player, in tiles: the ones on screen
+  // and the party anywhere on the map. Talkers not listed are heard centered, as
+  // loud as someone far away.
   void setPositions(std::unordered_map<uint32_t, std::pair<float, float>> positions);
   void setBlocked(uint32_t creature, bool blocked);
 
@@ -69,6 +73,7 @@ private:
     std::unique_ptr<JitterBuffer> jitter = std::make_unique<JitterBuffer>(3);
     bool talking = false;
     int idlePackets = 0;
+    float left = -1, right = -1;  // gains of the last packet, to glide from (-1: none yet)
   };
 
   void close();
@@ -81,6 +86,7 @@ private:
   bool capture_ = false;
   std::atomic<bool> muted_{false};
   std::atomic<float> volume_{1.f};
+  std::atomic<bool> surround_{true};
 
   std::unique_ptr<CaptureProcessor> processor_;
   std::unique_ptr<Sender> sender_;
