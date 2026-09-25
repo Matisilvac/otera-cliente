@@ -1,0 +1,13 @@
+{
+  "name": "otera-voice",
+  "version-string": "1",
+  "builtin-baseline": "cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3",
+  "dependencies": [
+    { "name": "ixwebsocket", "default-features": false },
+    "mbedtls",
+    "miniaudio",
+    "nlohmann-json",
+    "opus",
+    "speexdsp"
+  ]
+}
