@@ -1,0 +1,91 @@
+name: Client voice
+# Builds bin/otera-voice (the voice chat helper, client/native/voice) for Windows
+# and Linux, runs its tests on each (jitter buffer, and serve as the game launches
+# it: status file in a folder with accents, websocket, quit) and uploads the binary
+# with its provenance record and licenses. macOS is built by client/empaquetar.py.
+# Vive en Matisilvac/otera-cliente por lo mismo que client-updater.yml: en un repo
+# publico los runners son gratis. La copia de Matisilvac/otera es la de referencia.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/client-voice.yml
+      - client/native/voice/**
+      - tests/client_voice.py
+permissions:
+  contents: read
+jobs:
+  voice:
+    name: Voice ${{ matrix.platform }}
+    # This private repo has no Actions budget; the reference copy never runs here.
+    if: github.repository == 'Matisilvac/otera-cliente'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            runner: windows-2025-vs2026
+            triplet: x64-windows-static
+            binary: otera-voice.exe
+          - platform: linux
+            runner: ubuntu-24.04
+            triplet: x64-linux
+            binary: otera-voice
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/.vcpkg-cache
+    steps:
+      - name: Preserve source line endings
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          ref: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # same baseline as the game binaries
+          path: vcpkg
+          fetch-depth: 0 # manifest mode resolves versions from git history
+      - uses: actions/cache@v4
+        with:
+          path: .vcpkg-cache
+          key: otera-voice-${{ matrix.platform }}-${{ hashFiles('client/native/voice/vcpkg.json') }}-v1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Tools
+        shell: bash
+        run: |
+          mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
+          python -m pip install --quiet websockets
+          if [ "$RUNNER_OS" = "Windows" ]; then ./vcpkg/bootstrap-vcpkg.bat -disableMetrics; else ./vcpkg/bootstrap-vcpkg.sh -disableMetrics; fi
+      - name: Build
+        shell: bash
+        run: |
+          cmake -S client/native/voice -B build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
+          cmake --build build --config Release
+      - name: Tests
+        shell: bash
+        run: |
+          binary=build/${{ matrix.binary }}
+          [ -f "$binary" ] || binary=build/Release/${{ matrix.binary }}
+          python tests/client_voice.py --binary "$binary"
+      - name: Record provenance
+        shell: bash
+        run: |
+          binary=build/${{ matrix.binary }}
+          [ -f "$binary" ] || binary=build/Release/${{ matrix.binary }}
+          python client/native/voice/provenance.py --platform ${{ matrix.platform }} --binary "$binary" --output artifacts
+          cp vcpkg/LICENSE.txt artifacts/vcpkg-LICENSE.txt
+          find build/vcpkg_installed -path '*/share/*/copyright' | sort | while read f; do
+            echo "=== $(basename "$(dirname "$f")") ===" >> artifacts/otera-voice-licenses.txt
+            cat "$f" >> artifacts/otera-voice-licenses.txt
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: otera-voice-${{ matrix.platform }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30

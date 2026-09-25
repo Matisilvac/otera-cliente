@@ -68,11 +68,26 @@ El workflow [`client-updater.yml`](.github/workflows/client-updater.yml) lo
 compila para Windows y Linux y corre ahi [`tests/client_updater.py`](tests/client_updater.py),
 las pruebas de punta a punta contra un servidor HTTPS local.
 
+## Chat de voz
+
+`bin/otera-voice` es el ayudante del chat de voz, con el codigo en
+[`client/native/voice`](client/native/voice). El cliente lo lanza al entrar al juego
+y le habla por un websocket en 127.0.0.1. El ayudante captura el microfono, cancela
+el eco, detecta cuando hablas, comprime con Opus y manda la voz cifrada
+(ChaCha20-Poly1305) por UDP al servidor, que la reparte a tu party y a los que estan
+cerca. El microfono solo se abre cuando alguien te puede oir. En macOS va como
+`bin/Otera Voz.app`, para que el sistema pida el permiso de microfono a su nombre.
+
+El workflow [`client-voice.yml`](.github/workflows/client-voice.yml) lo compila para
+Windows y Linux y corre [`tests/client_voice.py`](tests/client_voice.py).
+
 ## Licencias
 
 OTClient es MIT (ver el repositorio de upstream). El actualizador trae las
 licencias de lo que lleva adentro (IXWebSocket, mbedTLS, zlib, nlohmann-json) en
-`bin/otera-updater-licenses.txt`. Los archivos de graficos
+`bin/otera-updater-licenses.txt`, y el ayudante de voz las suyas (miniaudio, Opus,
+speexdsp, mbedTLS, IXWebSocket, nlohmann-json) en `bin/otera-voice-licenses.txt`.
+Los archivos de graficos
 (`Tibia.spr`, `Tibia.dat`) son propiedad de CipSoft GmbH y no estan cubiertos
 por esa licencia: se incluyen para poder jugar, como hace cualquier cliente de
 Open Tibia. Otera no tiene relacion con CipSoft.
