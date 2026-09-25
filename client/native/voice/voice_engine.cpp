@@ -42,6 +42,8 @@ namespace {
 
 // A talker that has not said anything for this long frees its decoder.
 constexpr int kForgetPackets = 30 * 50;
+// Positional mix (Engine::mix).
+constexpr float kFarGain = 0.5f, kMaxPan = 0.6f;
 
 void deviceCallback(ma_device* device, void* output, const void* input, ma_uint32 frames) {
   static_cast<Engine*>(device->pUserData)
@@ -188,22 +190,35 @@ void Engine::mix(int16_t* stereo) {
       t.talking = t.jitter->talking();
       t.idlePackets = audible ? 0 : t.idlePackets + 1;
       if (audible) {
-        // Where the talker stands: to the side pans, farther is quieter. Someone off
-        // screen (party across the map) is centered, a step below the ones in view.
-        float gain = 0.8f, pan = 0.f;
+        // Where the talker stands: to the side pans, farther is quieter. The same
+        // curve on screen and off it (the party anywhere on the map), so walking out
+        // of view changes nothing: the voice keeps its side and its volume.
+        //   - volume: 1 next to you, 0.65 at the edge of the screen, 0.5 from 10 tiles
+        //     on, so the party far away is still clear;
+        //   - side: dx over the distance, the sine of the direction for someone far
+        //     away. At most 0.6: the other speaker keeps about a third (-10 dB), a
+        //     full pan sounds like a broken speaker.
+        float gain = kFarGain, pan = 0.f;
         auto pos = positions_.find(it->first);
         if (pos != positions_.end()) {
           float dx = pos->second.first, dy = pos->second.second;
-          gain = std::clamp(1.f - std::sqrt(dx * dx + dy * dy) / 14.f, 0.4f, 1.f);
-          pan = std::clamp(dx / 7.f, -1.f, 1.f) * 0.85f;
+          float distance = std::sqrt(dx * dx + dy * dy);
+          gain = std::clamp(1.f - distance / 20.f, kFarGain, 1.f);
+          pan = kMaxPan * dx / std::max(distance, 7.f);
         }
+        if (!surround_) pan = 0.f;
         // Equal-power pan: the talker keeps the same loudness wherever they are.
         float angle = (pan + 1.f) * 0.785398f;
         float gl = std::cos(angle) * gain * volume * 1.41421f, gr = std::sin(angle) * gain * volume * 1.41421f;
+        // Positions move a tile at a time; gliding over the packet keeps the step
+        // from clicking.
+        if (t.left < 0) t.left = gl, t.right = gr;
         for (int i = 0; i < kPacket; ++i) {
-          left[i] += pcm[i] * gl;
-          right[i] += pcm[i] * gr;
+          float k = float(i + 1) / kPacket;
+          left[i] += pcm[i] * (t.left + (gl - t.left) * k);
+          right[i] += pcm[i] * (t.right + (gr - t.right) * k);
         }
+        t.left = gl, t.right = gr;
       }
       if (t.idlePackets > kForgetPackets)
         it = talkers_.erase(it);
