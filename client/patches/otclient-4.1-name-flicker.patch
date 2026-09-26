@@ -1,0 +1,16 @@
+diff --git a/src/client/tile.cpp b/src/client/tile.cpp
+index f92bca27f..916661073 100644
+--- a/src/client/tile.cpp
++++ b/src/client/tile.cpp
+@@ -206,7 +206,10 @@ void Tile::drawCreature(const MapPosInfo& mapRect, const Point& dest, const int
+ 
+     // draw the local character if he is on a virtual tile, that is, his visual position is not the same as the server.
+     if (!localPlayerDrawed && g_game.getLocalPlayer() && !g_game.getLocalPlayer()->isWalking() && g_game.getLocalPlayer()->getPosition() == m_position) {
+-        drawThing(g_game.getLocalPlayer(), dest, flags, drawElevation, lightView);
++        const auto& localPlayer = g_game.getLocalPlayer();
++        drawThing(localPlayer, dest, flags, drawElevation, lightView);
++        // Otera: also the name and bars; otherwise they vanish until the server confirms the pre-walk step.
++        localPlayer->drawInformation(mapRect, dest, flags);
+     }
+ }
+ 

@@ -23,6 +23,10 @@ def main():
         raise SystemExit('Unexpected OTClient source revision')
     # A reverse check proves the delivered source contains the complete patch.
     subprocess.run(['git', 'apply', '--reverse', '--check', str(PATCH)], cwd=args.source, check=True)
+    # Game fixes applied after autowalk (the name flicker of #194); recorded by hash.
+    game_patches = [PATCH.parent / 'otclient-4.1-name-flicker.patch']
+    for patch in game_patches:
+        subprocess.run(['git', 'apply', '--reverse', '--check', str(patch)], cwd=args.source, check=True)
     tls_patches = [PATCH.parent / name for name in ('security-tls.patch', 'security-tls-probe.patch', 'security-tls-profile.patch')]
     for patch in tls_patches:
         subprocess.run(['git', 'apply', '--reverse', '--check', str(patch)], cwd=args.source, check=True)
@@ -42,7 +46,7 @@ def main():
     if not profile_test.get('passed') or not profile_test.get('profile_mode') or profile_test['binary_sha256'] != digest(binary):
         raise SystemExit('Native profile TLS checks must pass on the same binary')
     shutil.copy2('profile-tls-result.json', args.output / 'profile-tls-result.json')
-    manifest = dict(tls_patches={p.name: digest(p) for p in tls_patches}, purpose='TLS rehearsal; not public release', platform=args.platform, source=revision, patch_sha256=digest(PATCH),
+    manifest = dict(tls_patches={p.name: digest(p) for p in tls_patches}, game_patches={p.name: digest(p) for p in game_patches}, purpose='TLS rehearsal; not public release', platform=args.platform, source=revision, patch_sha256=digest(PATCH),
                     binary=name, sha256=digest(binary))
     statuses=list((args.source/'build'/(args.platform+'-release')).rglob('vcpkg/status'))
     if len(statuses)!=1: raise SystemExit('Expected one installed dependency status file')
