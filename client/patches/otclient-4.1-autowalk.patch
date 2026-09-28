@@ -1,11 +1,110 @@
 diff --git a/src/client/localplayer.cpp b/src/client/localplayer.cpp
-index 8ddb23bf5..1d2e875ab 100644
+index 8ddb23bf5..3b78d6873 100644
 --- a/src/client/localplayer.cpp
 +++ b/src/client/localplayer.cpp
-@@ -205,9 +205,12 @@ bool LocalPlayer::autoWalk(const Position& destination, const bool retry)
-             return;
-         }
+@@ -118,26 +118,43 @@ void LocalPlayer::cancelAdjustInvalidPosEvent() {
+     m_adjustInvalidPosEvent = nullptr;
+ }
  
+-bool LocalPlayer::retryAutoWalk()
++bool LocalPlayer::scheduleAutoWalkRetry()
+ {
+-    if (!m_autoWalkDestination.isValid()) {
++    // Something got in the way of a route already under way: a creature stepped onto
++    // the next tile, or stands on the destination. Plan again from where we are, a
++    // little later each time; any step the server confirms starts the count over.
++    constexpr uint8_t MAX_AUTOWALK_RETRIES = 10;
++    if (m_autoWalkRetries >= MAX_AUTOWALK_RETRIES)
+         return false;
+-    }
+ 
+-    g_game.stop();
+-
+-    if (m_autoWalkRetries <= 3) {
+-        if (m_autoWalkContinueEvent)
+-            m_autoWalkContinueEvent->cancel();
++    m_autoWalkRetries += 1;
++    if (m_autoWalkContinueEvent)
++        m_autoWalkContinueEvent->cancel();
+ 
+-        m_autoWalkContinueEvent = g_dispatcher.scheduleEvent(
+-            [thisPtr = asLocalPlayer(), autoWalkDest = m_autoWalkDestination] { thisPtr->autoWalk(autoWalkDest, true); }, 200
+-        );
++    m_autoWalkContinueEvent = g_dispatcher.scheduleEvent(
++        [thisPtr = asLocalPlayer(), autoWalkDest = m_autoWalkDestination] {
++            // autoWalk() cancels m_autoWalkContinueEvent, and cancelling an event destroys
++            // its callback: this lambda, while it runs. Forget the event first and pass
++            // copies. Upstream passed autoWalkDest by reference into its own destroyed
++            // capture, so every retry walked to a garbage position and gave up.
++            const auto self = thisPtr;
++            const auto destination = autoWalkDest;
++            self->m_autoWalkContinueEvent = nullptr;
++            self->autoWalk(destination, true);
++        },
++        100 + 100 * std::min<int>(m_autoWalkRetries, 4)
++    );
++    return true;
++}
+ 
+-        m_autoWalkRetries += 1;
++bool LocalPlayer::retryAutoWalk()
++{
++    if (!m_autoWalkDestination.isValid()) {
++        return false;
++    }
+ 
++    if (scheduleAutoWalkRetry())
+         return true;
+-    }
+ 
+     m_autoWalkDestination = {};
+     return false;
+@@ -165,8 +182,12 @@ void LocalPlayer::cancelWalk(const Otc::Direction direction)
+     callLuaField("onCancelWalk", direction);
+ }
+ 
+-bool LocalPlayer::autoWalk(const Position& destination, const bool retry)
++bool LocalPlayer::autoWalk(const Position& destinationRef, const bool retry)
+ {
++    // A copy: callers pass m_autoWalkDestination itself (the next chunk, from
++    // onPositionChange), which is cleared right below.
++    const Position destination = destinationRef;
++
+     // reset state
+     m_autoWalkDestination = {};
+     m_lastAutoWalkPosition = {};
+@@ -182,15 +203,16 @@ bool LocalPlayer::autoWalk(const Position& destination, const bool retry)
+ 
+     m_autoWalkDestination = destination;
+ 
+-    g_map.findPathAsync(m_position, destination, [self = asLocalPlayer()](const auto& result) {
++    g_map.findPathAsync(m_position, destination, [self = asLocalPlayer(), retry](const auto& result) {
+         if (self->m_autoWalkDestination != result->destination)
+             return;
+ 
+-        if (result->status != Otc::PathFindResultOk) {
+-            if (self->m_autoWalkRetries > 0 && self->m_autoWalkRetries <= 3) { // try again in 300, 700, 1200 ms if canceled by server
+-                self->m_autoWalkContinueEvent = g_dispatcher.scheduleEvent([self, capture0 = result->destination] { self->autoWalk(capture0, true); }, 200 + self->m_autoWalkRetries * 100);
++        if (result->status != Otc::PathFindResultOk || result->path.empty()) {
++            // A click with no way there fails at once. A route that was already under
++            // way (a retry or the next chunk) keeps trying for a while: what blocks it
++            // now is usually a creature that moves on.
++            if (retry && self->scheduleAutoWalkRetry())
+                 return;
+-            }
+             self->m_autoWalkDestination = {};
+             self->callLuaField("onAutoWalkFail", result->status);
+             return;
+@@ -199,15 +221,12 @@ bool LocalPlayer::autoWalk(const Position& destination, const bool retry)
+         if (result->path.size() > 127)
+             result->path.resize(127);
+ 
+-        if (result->path.empty()) {
+-            self->m_autoWalkDestination = {};
+-            self->callLuaField("onAutoWalkFail", result->status);
+-            return;
+-        }
+-
 -        if (self->m_autoWalkDestination != result->destination) {
 -            self->m_lastAutoWalkPosition = result->destination;
 -        }
@@ -18,3 +117,191 @@ index 8ddb23bf5..1d2e875ab 100644
  
          g_game.autoWalk(result->path, result->start);
      });
+@@ -247,7 +266,7 @@ void LocalPlayer::onPositionChange(const Position& newPos, const Position& oldPo
+     if (newPos == m_autoWalkDestination)
+         stopAutoWalk();
+     else if (m_autoWalkDestination.isValid() && newPos == m_lastAutoWalkPosition)
+-        autoWalk(m_autoWalkDestination);
++        autoWalk(m_autoWalkDestination, true);
+ 
+     m_serverWalk = false;
+ }
+diff --git a/src/client/localplayer.h b/src/client/localplayer.h
+index d42b52aa3..6db983424 100644
+--- a/src/client/localplayer.h
++++ b/src/client/localplayer.h
+@@ -168,6 +168,7 @@ private:
+     void registerAdjustInvalidPosEvent();
+ 
+     bool retryAutoWalk();
++    bool scheduleAutoWalkRetry();
+ 
+     // walk related
+     Position m_lastAutoWalkPosition;
+diff --git a/src/client/map.cpp b/src/client/map.cpp
+index 46dc5d348..4f111fbbe 100644
+--- a/src/client/map.cpp
++++ b/src/client/map.cpp
+@@ -1025,29 +1025,37 @@ PathFindResult_ptr Map::newFindPath(const Position& start, const Position& goal,
+         return ret;
+     }
+ 
+-    // check the goal pos is walkable
+-    if (g_map.isAwareOfPosition(goal)) {
+-        const auto& goalTile = getTile(goal);
+-        if (!goalTile || (!goalTile->isWalkable())) {
+-            return ret;
+-        }
+-    } else {
+-        const auto& goalTile = g_minimap.getTile(goal);
+-        if (goalTile.hasFlag(MinimapTileNotWalkable)) {
++    // check the goal pos is walkable. Upstream trusted isAwareOfPosition and gave up
++    // when the tile was in range but hadn't arrived yet (a destination ~15 tiles away,
++    // right after a step): a click that had just worked failed on its first retry.
++    if (const auto& goalTile = getTile(goal)) {
++        if (!goalTile->isWalkable()) {
+             return ret;
+         }
++    } else if (g_minimap.getTile(goal).hasFlag(MinimapTileNotWalkable)) {
++        return ret;
+     }
+ 
+-    struct LessNode
++    // A* over the known map. g (totalCost) is the walking time: the ground speed of each
++    // step, three times that for a diagonal. h is the Manhattan distance at the fastest
++    // ground there is: a diagonal (3x) never beats two straight steps (2x), so it never
++    // overestimates and the route found is the fastest one. Upstream added the distance
++    // to the goal to every step instead, which searches a disc around the start and ran
++    // out of its 50000 nodes before reaching anything ~250 tiles away.
++    constexpr float FASTEST_GROUND = 80.0f;
++    constexpr int MAX_EXPANSIONS = 400000;
++    const auto heuristic = [&goal](const Position& pos) {
++        return FASTEST_GROUND * static_cast<float>(std::abs(pos.x - goal.x) + std::abs(pos.y - goal.y));
++    };
++
++    using OpenEntry = std::pair<float, Node*>;
++    struct LessEntry
+     {
+-        bool operator()(const Node* a, const Node* b) const
+-        {
+-            return b->totalCost < a->totalCost;
+-        }
++        bool operator()(const OpenEntry& a, const OpenEntry& b) const { return b.first < a.first; }
+     };
+ 
+     stdext::map<Position, Node*, Position::Hasher> nodes;
+-    std::priority_queue<Node*, std::vector<Node*>, LessNode> searchList;
++    std::priority_queue<OpenEntry, std::vector<OpenEntry>, LessEntry> searchList;
+ 
+     if (visibleNodes) {
+         for (auto& node : *visibleNodes)
+@@ -1056,21 +1064,23 @@ PathFindResult_ptr Map::newFindPath(const Position& start, const Position& goal,
+ 
+     const auto& initNode = new Node{ .cost = 1, .totalCost = 0, .pos = start, .prev = nullptr, .distance = 0, .unseen = 0 };
+     nodes[start] = initNode;
+-    searchList.push(initNode);
++    searchList.emplace(heuristic(start), initNode);
+ 
+-    int limit = 50000;
+-    const float distance = start.distance(goal);
++    int expansions = 0;
++    const float diagonalFactor = g_gameConfig.getPlayerDiagonalWalkSpeed();
+ 
+     const Node* dstNode = nullptr;
+-    while (!searchList.empty() && --limit) {
+-        Node* node = searchList.top();
++    while (!searchList.empty() && expansions < MAX_EXPANSIONS) {
++        const auto [f, node] = searchList.top();
+         searchList.pop();
++        // stale entry: the node was reached again with a lower cost after this was queued
++        if (f > node->totalCost + heuristic(node->pos) + 0.5f)
++            continue;
++        ++expansions;
+         if (node->pos == goal) {
+             dstNode = node;
+             break;
+         }
+-        if (node->pos.distance(goal) > distance + 10000)
+-            continue;
+         for (int i = -1; i <= 1; ++i) {
+             for (int j = -1; j <= 1; ++j) {
+                 if (i == 0 && j == 0)
+@@ -1091,26 +1101,24 @@ PathFindResult_ptr Map::newFindPath(const Position& start, const Position& goal,
+                         if (!wasSeen)
+                             speed = 2000;
+                         it = nodes.emplace(neighbor, new Node{ .cost = speed, .totalCost = 10000000.0f, .pos = neighbor, .prev =
+-                                               node,
+-                                               .distance = node->distance + 1, .unseen = wasSeen ? 0 : 1 }).first;
++                                               nullptr, .distance = 0, .unseen = wasSeen ? 0 : 1 }).first;
+                     }
+                 }
+-                if (!it->second) // no way
++                Node* next = it->second;
++                if (!next) // no way
+                     continue;
+ 
+-                if (it->second->unseen > 50)
++                const int unseen = next->unseen ? node->unseen + 1 : 0;
++                if (unseen > 50)
+                     continue;
+ 
+-                float diagonal = ((i == 0 || j == 0) ? 1.0f : g_gameConfig.getPlayerDiagonalWalkSpeed());
+-                float cost = it->second->cost * diagonal;
+-                cost += diagonal * (50.0f * std::max<float>(5.0f, it->second->pos.distance(goal))); // heuristic
+-                if (node->totalCost + cost + 50 < it->second->totalCost) {
+-                    it->second->totalCost = node->totalCost + cost;
+-                    it->second->prev = node;
+-                    if (it->second->unseen)
+-                        it->second->unseen = node->unseen + 1;
+-                    it->second->distance = node->distance + 1;
+-                    searchList.push(it->second);
++                const float cost = node->totalCost + next->cost * ((i == 0 || j == 0) ? 1.0f : diagonalFactor);
++                if (cost < next->totalCost) {
++                    next->totalCost = cost;
++                    next->prev = node;
++                    next->unseen = unseen;
++                    next->distance = node->distance + 1;
++                    searchList.emplace(cost + heuristic(neighbor), next);
+                 }
+             }
+         }
+@@ -1128,7 +1136,7 @@ PathFindResult_ptr Map::newFindPath(const Position& start, const Position& goal,
+         std::reverse(ret->path.begin(), ret->path.end());
+         ret->status = Otc::PathFindResultOk;
+     }
+-    ret->complexity = 50000 - limit;
++    ret->complexity = expansions;
+ 
+     for (const auto& node : nodes) {
+         delete node.second;
+@@ -1140,14 +1148,26 @@ PathFindResult_ptr Map::newFindPath(const Position& start, const Position& goal,
+ void Map::findPathAsync(const Position& start, const Position& goal, const std::function<void(PathFindResult_ptr)>&
+                         callback)
+ {
++    // A creature next to the player blocks the route, as upstream. One further away is
++    // likely to have moved by the time we get there: it only makes its tile expensive,
++    // so the route goes around it when that is short and through it otherwise, instead
++    // of failing because someone stands in a doorway down the road. If it is still
++    // there, the step bumps into it and the walk is planned again from that spot.
++    constexpr int CREATURE_BLOCK_RANGE = 2;
++    constexpr float CREATURE_COST = 2000.0f;
++
+     const auto visibleNodes = std::make_shared<std::list<Node*>>();
+     for (const auto& tile : getTiles(start.z)) {
+-        if (tile->getPosition() == start)
++        const auto& pos = tile->getPosition();
++        if (pos == start)
+             continue;
+-        const bool isNotWalkable = !tile->isWalkable(false);
++        const bool isNotWalkable = !tile->isWalkable(true);
+         const bool isNotPathable = !tile->isPathable();
+-        const float speed = tile->getGroundSpeed();
+-        if ((isNotWalkable || isNotPathable) && tile->getPosition() != goal) {
++        const bool hasCreature = !isNotWalkable && !tile->isWalkable(false);
++        const bool creatureBlocks = hasCreature &&
++            std::max(std::abs(pos.x - start.x), std::abs(pos.y - start.y)) <= CREATURE_BLOCK_RANGE;
++        const float speed = tile->getGroundSpeed() + (hasCreature ? CREATURE_COST : 0.0f);
++        if ((isNotWalkable || isNotPathable || creatureBlocks) && tile->getPosition() != goal) {
+             visibleNodes->push_back(new Node{ .cost = speed, .totalCost = 0, .pos = tile->getPosition(), .prev = nullptr, .distance =
+                 0,
+                 .unseen = 0
