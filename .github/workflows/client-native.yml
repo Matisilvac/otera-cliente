@@ -50,11 +50,22 @@ jobs:
           ref: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # 4.1 manifest baseline
           path: vcpkg
           persist-credentials: false
+      # La cache de binarios de vcpkg vale para un compilador: vcpkg mete su hash en
+      # el ABI de cada paquete. Con una clave fija, la primera cache (22/09) quedo
+      # congelada con el MSVC de ese dia y desde que GitHub actualizo la imagen
+      # restauraba 0 paquetes: Windows compilaba todo en cada corrida (~1 h). Ahora
+      # la clave lleva la imagen del runner, se guarda cuando no hubo una exacta y
+      # restore-keys aprovecha lo que siga valiendo de la anterior.
+      - name: Runner image
+        id: image
+        shell: bash
+        run: echo "id=${ImageOS}-${ImageVersion}" >> "$GITHUB_OUTPUT"
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         id: native-cache
         with:
           path: .vcpkg-cache
-          key: otera-native-${{ matrix.platform }}-cd61e1e-v1
+          key: otera-native-${{ matrix.platform }}-cd61e1e-${{ steps.image.outputs.id }}-v2
+          restore-keys: otera-native-${{ matrix.platform }}-cd61e1e-
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: microsoft/vcpkg
@@ -149,6 +160,15 @@ jobs:
           if errorlevel 1 exit /b %errorlevel%
           cmake --build --preset windows-release --parallel %OTERA_BUILD_JOBS%
           exit /b %errorlevel%
+      - name: Save vcpkg binary cache
+        # Solo si todo compilo: una cache a medias con la clave exacta ya no se
+        # volveria a guardar y lo que falta se recompilaria para siempre. Un
+        # cache-hit exacto no se guarda (las claves de Actions no se pisan).
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: .vcpkg-cache
+          key: otera-native-${{ matrix.platform }}-cd61e1e-${{ steps.image.outputs.id }}-v2
       - name: Check Windows executable startup
         if: runner.os == 'Windows'
         shell: pwsh
