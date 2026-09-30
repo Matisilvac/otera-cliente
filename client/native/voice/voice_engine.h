@@ -45,6 +45,8 @@ public:
   // Off, every talker is centered (one earbud, a mono speaker); distance still
   // lowers the volume.
   void setSurround(bool surround) { surround_ = surround; }
+  // RNNoise on the mic (CaptureProcessor::setNoiseCancel), on by default.
+  void setNoiseCancel(bool on);
 
   // Network thread.
   void onVoice(uint32_t creature, uint16_t seq, uint8_t flags, const uint8_t* opus, size_t size);
@@ -54,6 +56,8 @@ public:
   // loud as someone far away.
   void setPositions(std::unordered_map<uint32_t, std::pair<float, float>> positions);
   void setBlocked(uint32_t creature, bool blocked);
+  // Per-player volume on top of everything else, 0-2 (1: as leveled).
+  void setTalkerVolume(uint32_t creature, float volume);
 
   struct Status {
     float micDb = -100;
@@ -71,9 +75,11 @@ public:
 private:
   struct Talker {
     std::unique_ptr<JitterBuffer> jitter = std::make_unique<JitterBuffer>(3);
+    Leveler leveler;
     bool talking = false;
     int idlePackets = 0;
     float left = -1, right = -1;  // gains of the last packet, to glide from (-1: none yet)
+    float level = -1;             // the leveler's gain of the last packet, likewise
   };
 
   void close();
@@ -90,6 +96,7 @@ private:
 
   std::unique_ptr<CaptureProcessor> processor_;
   std::unique_ptr<Sender> sender_;
+  Limiter limiter_;  // audio thread only
   Ring micIn_{kRate}, reference_{kRate}, playOut_{2 * kRate};  // audio thread only
   std::vector<int16_t> micFile_;
   size_t micFilePos_ = 0;
@@ -100,6 +107,7 @@ private:
   std::unordered_map<uint32_t, Talker> talkers_;
   std::unordered_map<uint32_t, std::pair<float, float>> positions_;
   std::unordered_map<uint32_t, bool> blocked_;
+  std::unordered_map<uint32_t, float> talkerVolumes_;
 
   std::atomic<float> micDb_{-100};
   std::atomic<bool> open_{false};

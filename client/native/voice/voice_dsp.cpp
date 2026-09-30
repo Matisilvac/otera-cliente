@@ -6,6 +6,7 @@
 #include <stdexcept>
 
 #include <opus.h>
+#include <rnnoise.h>
 #include <speex/speex_echo.h>
 #include <speex/speex_preprocess.h>
 
@@ -35,8 +36,16 @@ constexpr float kFarLoudDb = -40.f;
 constexpr int kSafeFrames = 50;
 // Mic minus processed level above which a frame is taken as mostly echo.
 constexpr float kEchoRemovedDb = 12.f;
+// Right after the mic opens the preprocessor has not measured the room yet and
+// gives any noise a speech probability near 1: with a keyboard or a fan the gate
+// opened for the first 400 ms each time. It learns the noise in these frames.
+constexpr int kWarmupFrames = 20;  // 200 ms
 
-CaptureProcessor::CaptureProcessor(int echoTailMs, bool echoCancel) : silence_(kFrame, 0) {
+CaptureProcessor::CaptureProcessor(int echoTailMs, bool echoCancel)
+    : rnnIn_(kFrame), rnnOut_(kFrame), silence_(kFrame, 0) {
+  // RNNoise works on 10 ms at 48 kHz, the same frame as the rest of the chain.
+  static_assert(kFrame == 480, "rnnoise_get_frame_size()");
+  rnn_ = rnnoise_create(nullptr);
   if (echoCancel) {
     echo_ = speex_echo_state_init(kFrame, kRate * echoTailMs / 1000);
     int rate = kRate;
@@ -55,6 +64,7 @@ CaptureProcessor::CaptureProcessor(int echoTailMs, bool echoCancel) : silence_(k
 }
 
 CaptureProcessor::~CaptureProcessor() {
+  if (rnn_) rnnoise_destroy(rnn_);
   if (pre_) speex_preprocess_state_destroy(pre_);
   if (echo_) speex_echo_state_destroy(echo_);
 }
@@ -75,6 +85,13 @@ CaptureProcessor::Result CaptureProcessor::process(const int16_t* mic, const int
     speex_echo_cancellation(echo_, mic, speaker ? speaker : silence_.data(), out);
   else
     std::memcpy(out, mic, kFrame * sizeof(int16_t));
+  // Before Speex, as Mumble does: the preprocessor then measures the speech
+  // probability on the cleaned voice, and still removes the residual echo.
+  if (noiseCancel_ && rnn_) {
+    for (int i = 0; i < kFrame; ++i) rnnIn_[i] = out[i];
+    rnnoise_process_frame(rnn_, rnnOut_.data(), rnnIn_.data());
+    for (int i = 0; i < kFrame; ++i) out[i] = int16_t(std::clamp(rnnOut_[i], -32768.f, 32767.f));
+  }
   speex_preprocess_run(pre_, out);
   int prob = 0;
   speex_preprocess_ctl(pre_, SPEEX_PREPROCESS_GET_PROB, &prob);
@@ -83,6 +100,10 @@ CaptureProcessor::Result CaptureProcessor::process(const int16_t* mic, const int
 
   bool loud = r.outDb > minDb_;
   bool speech = loud && (r.probability >= openAbove_ || (open_ && r.probability >= stayAbove_));
+  if (warmup_ < kWarmupFrames) {
+    ++warmup_;
+    speech = false;
+  }
 
   // The preprocessor alone lets bits of the other player's voice through: at the
   // onsets of their words, and for the first seconds while the canceller learns
@@ -245,6 +266,53 @@ bool JitterBuffer::pull(int16_t* out) {
     if (end) opus_decoder_ctl(dec_, OPUS_RESET_STATE);
   }
   return true;
+}
+
+// --------------------------------------------------------------------------
+// Receive level
+// --------------------------------------------------------------------------
+
+// Where the loud packets of every voice end up. The loud packets of normal speech
+// through a well set mic sit around here, so a talker like that is left as is.
+constexpr float kTargetDb = -18.f;
+// Packets below this are pauses, breathing or concealment: they do not move the gain.
+constexpr float kSpeechFloorDb = -50.f;
+// A shouting or too hot mic comes down as far as it needs; a quiet one goes up at
+// most this much, because what is boosted is its noise too.
+constexpr float kMinGainDb = -30.f, kMaxGainDb = 6.f;
+// Per 20 ms packet: the level falls back ~2 dB a second of speech after a loud burst.
+constexpr float kReleasePerPacket = 0.02f;
+
+float Leveler::gain(const int16_t* pcm) {
+  float db = levelDb(pcm, kPacket);
+  if (db > kSpeechFloorDb) {
+    // Instant attack: the first loud packet of a talker is already brought down,
+    // with nothing heard at full blast while the level is learned.
+    if (db > envelopeDb_)
+      envelopeDb_ = db;
+    else
+      envelopeDb_ += (db - envelopeDb_) * kReleasePerPacket;
+  }
+  if (envelopeDb_ <= kSpeechFloorDb) return 1.f;
+  float gainDb = std::clamp(kTargetDb - envelopeDb_, kMinGainDb, kMaxGainDb);
+  return std::pow(10.f, gainDb / 20.f);
+}
+
+// -1 dBFS, and back to full gain with a ~100 ms time constant.
+constexpr float kCeiling = 29204.f;
+const float kLimiterRelease = 1.f - std::exp(-1.f / (0.1f * kRate));
+
+void Limiter::process(float* left, float* right) {
+  for (int i = 0; i < kPacket; ++i) {
+    float peak = std::max(std::fabs(left[i]), std::fabs(right[i]));
+    float needed = peak > kCeiling ? kCeiling / peak : 1.f;
+    if (needed < gain_)
+      gain_ = needed;
+    else
+      gain_ += (needed - gain_) * kLimiterRelease;
+    left[i] *= gain_;
+    right[i] *= gain_;
+  }
 }
 
 }  // namespace otera::voice

@@ -38,6 +38,10 @@ ROOMS = [
     ('eco tardio', ['--echo-delay', '100']),
     ('eco tardio y fuerte', ['--echo-delay', '100', '--echo-gain', '2']),
     ('eco muy tardio', ['--echo-delay', '180']),
+    # Teclado y ventilador de fondo todo el tiempo. Sin la cancelacion de ruido
+    # (RNNoise) el microfono quedaba abierto entre el 60 y el 90% del silencio.
+    ('teclado y ventilador', ['--noise-db', '-40']),
+    ('teclado fuerte', ['--noise-db', '-30']),
 ]
 
 failures = []
@@ -113,6 +117,9 @@ def main():
         jitter = subprocess.run([str(binary), 'selftest-jitter'], capture_output=True, text=True)
         print(jitter.stdout, end='')
         check(jitter.returncode == 0, 'jitter buffer')
+        level = subprocess.run([str(binary), 'selftest-level'], capture_output=True, text=True)
+        print(level.stdout, end='')
+        check(level.returncode == 0, 'nivelador y limitador de lo que se escucha')
         serve_smoke(binary, work)
 
         if not shutil.which('say'):
@@ -144,6 +151,9 @@ def main():
             if options[:2] != ['--echo-gain', '0']:
                 check(seg['far']['out_vs_in_db'] <= -20,
                       f'{name}: el eco se cancela ({seg["far"]["out_vs_in_db"]} dB)')
+            if '--noise-db' in options:
+                check(seg['silence_end']['out_vs_in_db'] <= -40,
+                      f'{name}: el ruido de fondo se saca ({seg["silence_end"]["out_vs_in_db"]} dB)')
             check(18 <= net['kbps_while_talking'] <= 30, f'{name}: {net["kbps_while_talking"]} kbps hablando')
             check(net['played'] + net['recovered'] + net['concealed'] >= net['received'] * 0.95 and net['late'] <= 2,
                   f'{name}: con 10% de perdida se reproduce todo lo que llega')

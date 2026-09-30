@@ -11,6 +11,7 @@
 
 struct SpeexEchoState_;
 struct SpeexPreprocessState_;
+struct DenoiseState;
 struct OpusEncoder;
 struct OpusDecoder;
 
@@ -50,9 +51,17 @@ public:
   void setSensitivity(float value);
   float sensitivity() const { return sensitivity_; }
 
+  // RNNoise on top of Speex: Speex only learns steady noise (a fan, a hum), the
+  // network also takes out keys, clicks and a TV behind the player.
+  void setNoiseCancel(bool on) { noiseCancel_ = on; }
+  bool noiseCancel() const { return noiseCancel_; }
+
 private:
   SpeexEchoState_* echo_ = nullptr;
   SpeexPreprocessState_* pre_ = nullptr;
+  DenoiseState* rnn_ = nullptr;
+  bool noiseCancel_ = true;
+  std::vector<float> rnnIn_, rnnOut_;
   std::vector<int16_t> silence_;
   float sensitivity_ = 0.5f;
   float openAbove_ = 0.f, stayAbove_ = 0.f, minDb_ = 0.f;
@@ -61,6 +70,7 @@ private:
   bool echoSafe_ = false;
   int safeFrames_ = 0;
   int farHold_ = 0;
+  int warmup_ = 0;
 };
 
 class Encoder {
@@ -119,6 +129,35 @@ private:
   int waited_ = 0;
   int missing_ = 0;
   Stats stats_;
+};
+
+// Receive side, one per talker: brings every voice to the same speech level before
+// the mix, whatever the talker's mic does. A mic set too hot (or a player shouting
+// into it) arrives near full scale and drowns everyone else; a quiet one is lost
+// under the rest. The gain follows the loud packets: it drops at once when the
+// talker gets louder and recovers over a couple of seconds, and pauses leave it
+// where it was, so the room noise between phrases is never pumped up.
+class Leveler {
+public:
+  // Gain for this packet of kPacket decoded samples.
+  float gain(const int16_t* pcm);
+  float envelopeDb() const { return envelopeDb_; }
+
+private:
+  float envelopeDb_ = -100.f;  // loud-packet level of this talker, dBFS (-100: nothing heard yet)
+};
+
+// The ceiling of the final mix: several talkers, or the volume above 100%, can add
+// up past full scale, and clipping there is what makes a voice sound broken. The
+// gain drops on the sample that would cross the ceiling and comes back in ~100 ms.
+class Limiter {
+public:
+  // left and right hold kPacket samples, already mixed, in 16-bit scale.
+  void process(float* left, float* right);
+  float gain() const { return gain_; }
+
+private:
+  float gain_ = 1.f;
 };
 
 // Fixed-capacity FIFO for the audio callback: no allocation once built.

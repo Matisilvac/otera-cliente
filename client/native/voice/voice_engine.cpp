@@ -77,6 +77,11 @@ void Engine::close() {
   device_->deviceReady = device_->contextReady = false;
 }
 
+void Engine::setNoiseCancel(bool on) {
+  // Like the sensitivity: a plain flag the audio thread reads once per frame.
+  processor_->setNoiseCancel(on);
+}
+
 void Engine::setSensitivity(float value) {
   // Only between reopens of the device the processor is replaced; the audio thread
   // reads the gate thresholds as plain floats, a torn read costs one frame.
@@ -85,11 +90,13 @@ void Engine::setSensitivity(float value) {
 
 bool Engine::configure(bool capture, const std::string& mic, const std::string& out, std::string& error) {
   float sensitivity = processor_->sensitivity();
+  bool noiseCancel = processor_->noiseCancel();
   close();
   capture_ = capture;
   // A new device is a new echo path: the canceller starts learning again.
   processor_ = std::make_unique<CaptureProcessor>();
   processor_->setSensitivity(sensitivity);
+  processor_->setNoiseCancel(noiseCancel);
   micIn_ = Ring(kRate);
   reference_ = Ring(kRate);
   playOut_ = Ring(2 * kRate);
@@ -151,6 +158,15 @@ void Engine::setBlocked(uint32_t creature, bool blocked) {
   if (blocked) talkers_.erase(creature);
 }
 
+void Engine::setTalkerVolume(uint32_t creature, float volume) {
+  std::lock_guard<std::mutex> lock(talkersMutex_);
+  volume = std::clamp(volume, 0.f, 2.f);
+  if (volume == 1.f)
+    talkerVolumes_.erase(creature);
+  else
+    talkerVolumes_[creature] = volume;
+}
+
 Engine::Status Engine::status() {
   Status s;
   s.micDb = capture_ ? micDb_.load() : -100.f;
@@ -207,6 +223,15 @@ void Engine::mix(int16_t* stereo) {
           pan = kMaxPan * dx / std::max(distance, 7.f);
         }
         if (!surround_) pan = 0.f;
+        // What the listener chose for this player ("Volumen de voz" on the menu).
+        auto chosen = talkerVolumes_.find(it->first);
+        if (chosen != talkerVolumes_.end()) gain *= chosen->second;
+        // Every talker at the same speech level first: a too hot mic comes down,
+        // a quiet one comes up a little. Distance and the volume slider act on top.
+        // Coming down it applies to the whole packet at once: gliding would play
+        // the start of a shout at the gain of the quiet packet before it.
+        float level = t.leveler.gain(pcm);
+        if (t.level < 0 || level < t.level) t.level = level;
         // Equal-power pan: the talker keeps the same loudness wherever they are.
         float angle = (pan + 1.f) * 0.785398f;
         float gl = std::cos(angle) * gain * volume * 1.41421f, gr = std::sin(angle) * gain * volume * 1.41421f;
@@ -215,10 +240,11 @@ void Engine::mix(int16_t* stereo) {
         if (t.left < 0) t.left = gl, t.right = gr;
         for (int i = 0; i < kPacket; ++i) {
           float k = float(i + 1) / kPacket;
-          left[i] += pcm[i] * (t.left + (gl - t.left) * k);
-          right[i] += pcm[i] * (t.right + (gr - t.right) * k);
+          float sample = pcm[i] * (t.level + (level - t.level) * k);
+          left[i] += sample * (t.left + (gl - t.left) * k);
+          right[i] += sample * (t.right + (gr - t.right) * k);
         }
-        t.left = gl, t.right = gr;
+        t.left = gl, t.right = gr, t.level = level;
       }
       if (t.idlePackets > kForgetPackets)
         it = talkers_.erase(it);
@@ -226,6 +252,7 @@ void Engine::mix(int16_t* stereo) {
         ++it;
     }
   }
+  limiter_.process(left, right);
   for (int i = 0; i < kPacket; ++i) {
     stereo[2 * i] = int16_t(std::clamp(left[i], -32768.f, 32767.f));
     stereo[2 * i + 1] = int16_t(std::clamp(right[i], -32768.f, 32767.f));
