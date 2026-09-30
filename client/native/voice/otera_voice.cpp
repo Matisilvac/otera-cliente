@@ -7,6 +7,7 @@
 //   otera-voice loopback [options]          hear yourself through the whole chain
 //   otera-voice selftest far.wav near.wav   echo, gate and codec, offline, as JSON
 //   otera-voice selftest-jitter             jitter buffer checks
+//   otera-voice selftest-level              receive leveler and mix limiter checks
 //
 // loopback runs mic -> echo cancellation -> gate -> Opus -> a simulated network
 // (delay, loss, reordering) -> jitter buffer -> speakers. With the default delay
@@ -162,7 +163,7 @@ std::string bar(float db) {
 int cmdLoopback(int argc, char** argv) {
   int delayMs = 1000, jitterMs = 0, seconds = 0, micIndex = -1, outIndex = -1;
   double lossPct = 0, sensitivity = 0.5;
-  bool aec = true, json = false;
+  bool aec = true, json = false, noiseCancel = true;
   for (int i = 2; i < argc; ++i) {
     std::string a = argv[i];
     auto value = [&]() -> const char* {
@@ -176,6 +177,7 @@ int cmdLoopback(int argc, char** argv) {
     else if (a == "--seconds") seconds = std::atoi(value());
     else if (a == "--mic") micIndex = std::atoi(value());
     else if (a == "--out") outIndex = std::atoi(value());
+    else if (a == "--no-noise-cancel") noiseCancel = false;
     else if (a == "--no-aec") aec = false;
     else if (a == "--json") json = true;
     else throw std::runtime_error("opcion desconocida: " + a);
@@ -183,6 +185,7 @@ int cmdLoopback(int argc, char** argv) {
 
   Loopback state(aec);
   state.capture.setSensitivity(float(sensitivity));
+  state.capture.setNoiseCancel(noiseCancel);
   state.delay = uint64_t(std::max(delayMs, 0)) * kRate / 1000;
   state.jitterMax = uint64_t(std::max(jitterMs, 0)) * kRate / 1000;
   state.loss = std::clamp(lossPct, 0.0, 100.0) / 100.0;
@@ -273,14 +276,16 @@ double energy(const std::vector<int16_t>& pcm, double from, double to) {
 int cmdSelftest(int argc, char** argv) {
   if (argc < 4) throw std::runtime_error("uso: otera-voice selftest far.wav near.wav [--out carpeta] [--no-aec]");
   std::string outDir, tracePath;
-  bool aec = true;
-  double echoGain = 1.0, echoDelayMs = 30;
+  bool aec = true, noiseCancel = true;
+  double echoGain = 1.0, echoDelayMs = 30, noiseDb = -100;
   for (int i = 4; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--out" && i + 1 < argc) outDir = argv[++i];
     else if (a == "--trace" && i + 1 < argc) tracePath = argv[++i];
     else if (a == "--echo-gain" && i + 1 < argc) echoGain = std::atof(argv[++i]);
     else if (a == "--echo-delay" && i + 1 < argc) echoDelayMs = std::atof(argv[++i]);
+    else if (a == "--noise-db" && i + 1 < argc) noiseDb = std::atof(argv[++i]);
+    else if (a == "--no-noise-cancel") noiseCancel = false;
     else if (a == "--no-aec") aec = false;
     else throw std::runtime_error("opcion desconocida: " + a);
   }
@@ -322,17 +327,38 @@ int cmdSelftest(int argc, char** argv) {
     taps.push_back({size_t((first + t) * kRate), gain * 0.25f * std::exp(-t / 0.04f) * (u(rng) > 0 ? 1.f : -1.f)});
   }
   std::normal_distribution<float> noise(0, 30);  // about -60 dBFS
+  // --noise-db: a player's room, all the way through. A fan (low-passed noise) and
+  // typing: key clicks, short bright bursts, about seven a second. Level is the RMS
+  // of the whole thing.
+  std::vector<float> room(n, 0.f);
+  if (noiseDb > -100) {
+    std::normal_distribution<float> white(0, 1);
+    std::uniform_real_distribution<double> when(0, 1);
+    float lp = 0, click = 0, clickGain = 0;
+    double sum = 0;
+    for (size_t i = 0; i < n; ++i) {
+      lp += 0.02f * (white(rng) - lp);
+      if (when(rng) < 7.0 / kRate) clickGain = 1.f;
+      click = clickGain * white(rng);
+      clickGain *= 0.995f;  // ~4 ms
+      room[i] = 6.f * lp + 0.7f * click;
+      sum += double(room[i]) * room[i];
+    }
+    float scale = float(32768.0 * std::pow(10.0, noiseDb / 20) / std::sqrt(sum / double(n)));
+    for (auto& v : room) v *= scale;
+  }
   std::vector<int16_t> mic(n), spk(n), out(n);
   for (size_t i = 0; i < n; ++i) {
     float echo = 0;
     for (auto& [d, g] : taps)
       if (i >= d) echo += g * speaker[i - d];
-    float v = echo + nearTrack[i] + noise(rng);
+    float v = echo + nearTrack[i] + noise(rng) + room[i];
     mic[i] = int16_t(std::clamp(v, -32768.f, 32767.f));
     spk[i] = int16_t(std::clamp(speaker[i], -32768.f, 32767.f));
   }
 
   CaptureProcessor capture(300, aec);
+  capture.setNoiseCancel(noiseCancel);
   std::vector<bool> open(n / kFrame);
   std::vector<float> prob(n / kFrame);
   FILE* trace = tracePath.empty() ? nullptr : std::fopen(tracePath.c_str(), "w");
@@ -488,6 +514,118 @@ int cmdSelftestJitter() {
   return failures ? 1 : 0;
 }
 
+// --------------------------------------------------------------------------
+// selftest-level
+// --------------------------------------------------------------------------
+
+// Something shaped like speech at a given level: 200 ms syllables of a warbling
+// tone with 100 ms gaps, packet by packet.
+std::vector<std::vector<int16_t>> speech(float db, int packets, uint32_t seed = 1) {
+  std::vector<std::vector<int16_t>> out;
+  float amp = 32768.f * std::pow(10.f, db / 20.f) * 1.41421f;  // sine: peak = rms * sqrt 2
+  double phase = 0;
+  for (int p = 0; p < packets; ++p) {
+    std::vector<int16_t> pcm(kPacket, 0);
+    if (p % 15 < 10) {
+      for (int i = 0; i < kPacket; ++i) {
+        double f = 180 + 60 * std::sin(0.002 * (p * kPacket + i) + seed);
+        phase += 2 * 3.14159265358979 * f / kRate;
+        pcm[i] = int16_t(std::clamp(amp * std::sin(phase), -32768.0, 32767.0));
+      }
+    }
+    out.push_back(std::move(pcm));
+  }
+  return out;
+}
+
+// Level of the loud packets after the leveler, from packet `from` on.
+float leveledDb(Leveler& lv, const std::vector<std::vector<int16_t>>& packets, size_t from, float* firstDb = nullptr) {
+  float loudest = -100.f;
+  for (size_t p = 0; p < packets.size(); ++p) {
+    float g = lv.gain(packets[p].data());
+    float db = levelDb(packets[p].data(), kPacket) + 20 * std::log10(g);
+    if (firstDb && p == 0) *firstDb = db;
+    if (p >= from && levelDb(packets[p].data(), kPacket) > -50) loudest = std::max(loudest, db);
+  }
+  return loudest;
+}
+
+int cmdSelftestLevel() {
+  char what[160];
+  {
+    Leveler lv;
+    float first = 0;
+    float db = leveledDb(lv, speech(-3, 100), 50, &first);
+    std::snprintf(what, sizeof(what), "un mic a -3 dBFS queda en %.1f dBFS (objetivo -18)", db);
+    check(std::fabs(db + 18) <= 1.5f, what);
+    std::snprintf(what, sizeof(what), "ya el primer paquete fuerte baja: %.1f dBFS", first);
+    check(first <= -17.f, what);
+  }
+  {
+    Leveler lv;
+    float db = leveledDb(lv, speech(-18, 100), 0);
+    std::snprintf(what, sizeof(what), "un mic bien puesto (-18) no se toca: %.1f dBFS", db);
+    check(std::fabs(db + 18) <= 0.5f, what);
+  }
+  {
+    Leveler lv;
+    float db = leveledDb(lv, speech(-34, 100), 50);
+    std::snprintf(what, sizeof(what), "un mic bajo (-34) sube a lo sumo 6 dB: %.1f dBFS", db);
+    check(std::fabs(db + 28) <= 0.5f, what);
+  }
+  {
+    Leveler lv;
+    leveledDb(lv, speech(-3, 100), 0);
+    std::vector<int16_t> quiet(kPacket, 0), hiss(kPacket);
+    float before = lv.gain(speech(-3, 1)[0].data());
+    for (int i = 0; i < kPacket; ++i) hiss[i] = int16_t((i * 7919 % 64) - 32);  // ~-60 dBFS
+    for (int p = 0; p < 150; ++p) lv.gain(p % 2 ? quiet.data() : hiss.data());
+    float after = lv.gain(speech(-3, 1)[0].data());
+    std::snprintf(what, sizeof(what), "3 s de pausa no suben la ganancia (%.1f -> %.1f dB)", 20 * std::log10(before),
+                  20 * std::log10(after));
+    check(std::fabs(20 * std::log10(after / before)) < 0.5f, what);
+  }
+  {
+    Leveler lv;
+    leveledDb(lv, speech(-3, 5), 0);  // a shout
+    float db = leveledDb(lv, speech(-18, 250), 150);
+    std::snprintf(what, sizeof(what), "despues de un grito vuelve a su nivel en unos segundos: %.1f dBFS", db);
+    check(db > -24.f, what);
+  }
+  {
+    // Two players shouting, the volume at 200%: without the limiter the mix goes
+    // far past full scale and clips.
+    Limiter lim;
+    auto a = speech(-3, 50, 1), b = speech(-3, 50, 7);
+    float peak = 0, overBefore = 0;
+    for (int p = 0; p < 50; ++p) {
+      float l[kPacket], r[kPacket];
+      for (int i = 0; i < kPacket; ++i) {
+        l[i] = 2.f * (a[p][i] + b[p][i]);
+        r[i] = 2.f * (a[p][i] - 0.5f * b[p][i]);
+        overBefore = std::max(overBefore, std::max(std::fabs(l[i]), std::fabs(r[i])));
+      }
+      lim.process(l, r);
+      for (int i = 0; i < kPacket; ++i) peak = std::max(peak, std::max(std::fabs(l[i]), std::fabs(r[i])));
+    }
+    std::snprintf(what, sizeof(what), "el limitador deja la mezcla bajo -1 dBFS (%.0f -> %.0f)", overBefore, peak);
+    check(overBefore > 32767.f && peak <= 29205.f, what);
+  }
+  {
+    Limiter lim;
+    auto a = speech(-18, 50);
+    bool same = true;
+    for (auto& pcm : a) {
+      float l[kPacket], r[kPacket];
+      for (int i = 0; i < kPacket; ++i) l[i] = r[i] = pcm[i];
+      lim.process(l, r);
+      for (int i = 0; i < kPacket; ++i) same = same && l[i] == float(pcm[i]);
+    }
+    check(same && lim.gain() == 1.f, "una voz normal pasa el limitador sin cambios");
+  }
+  return failures ? 1 : 0;
+}
+
 }  // namespace
 
 static int run(int argc, char** argv) {
@@ -498,6 +636,7 @@ static int run(int argc, char** argv) {
     if (cmd == "loopback") return cmdLoopback(argc, argv);
     if (cmd == "selftest") return cmdSelftest(argc, argv);
     if (cmd == "selftest-jitter") return cmdSelftestJitter();
+    if (cmd == "selftest-level") return cmdSelftestLevel();
   } catch (const std::exception& e) {
     std::fprintf(stderr, "otera-voice: %s\n", e.what());
     return 2;
@@ -506,10 +645,11 @@ static int run(int argc, char** argv) {
                "uso: otera-voice serve <status.json> [--null-audio] [--mic-file wav] [--record wav]\n"
                "     otera-voice devices\n"
                "     otera-voice loopback [--delay ms] [--loss %%] [--jitter ms] [--sensitivity 0-1]\n"
-               "                          [--mic n] [--out n] [--no-aec] [--seconds n] [--json]\n"
+               "                          [--mic n] [--out n] [--no-aec] [--no-noise-cancel] [--seconds n] [--json]\n"
                "     otera-voice selftest far.wav near.wav [--out carpeta] [--trace csv] [--no-aec]\n"
-               "                          [--echo-gain g] [--echo-delay ms]\n"
-               "     otera-voice selftest-jitter\n");
+               "                          [--echo-gain g] [--echo-delay ms] [--noise-db db] [--no-noise-cancel]\n"
+               "     otera-voice selftest-jitter\n"
+               "     otera-voice selftest-level\n");
   return 2;
 }
 

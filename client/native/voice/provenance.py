@@ -16,7 +16,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SOURCES = ('CMakeLists.txt', 'vcpkg.json', 'miniaudio_impl.c', 'otera_voice.cpp', 'voice_dsp.cpp', 'voice_dsp.h',
-           'voice_engine.cpp', 'voice_engine.h', 'voice_net.cpp', 'voice_net.h', 'voice_serve.cpp')
+           'voice_engine.cpp', 'voice_engine.h', 'voice_net.cpp', 'voice_net.h', 'voice_serve.cpp',
+           *(f'rnnoise/{name}' for name in (
+               'COPYING', 'rnnoise.h', 'denoise.c', 'rnn.c', 'rnn_data.c', 'pitch.c', 'kiss_fft.c', 'celt_lpc.c',
+               '_kiss_fft_guts.h', 'arch.h', 'celt_lpc.h', 'common.h', 'kiss_fft.h', 'opus_types.h', 'pitch.h',
+               'rnn.h', 'rnn_data.h', 'tansig_table.h')))
 RECORD = 'otera-voice-build.json'
 
 

@@ -14,9 +14,10 @@
 //     session  {host, port, id, key}   the relay session from opcode 110
 //     capture  {on}                    open the mic (someone can hear the player)
 //     mute     {on}                    self-mute, the device stays open
-//     settings {sensitivity, volume, mic, out, surround}
+//     settings {sensitivity, volume, mic, out, surround, noise}
 //     pos      {c: {"<creature>": [dx, dy]}}   talkers on screen and the party, in tiles
 //     block    {id, on}                per-player mute
+//     gain     {id, value}             per-player volume, 0-2 (1: normal)
 //     devices  {}                      list mics and outputs
 //     quit     {}
 //   helper -> client
@@ -165,6 +166,7 @@ void handle(Serve& s, const json& m) {
     if (m.contains("sensitivity")) s.engine->setSensitivity(m["sensitivity"].get<float>());
     if (m.contains("volume")) s.engine->setVolume(m["volume"].get<float>());
     if (m.contains("surround")) s.engine->setSurround(m["surround"].get<bool>());
+    if (m.contains("noise")) s.engine->setNoiseCancel(m["noise"].get<bool>());
     std::string mic = m.value("mic", s.mic), out = m.value("out", s.out);
     if (mic != s.mic || out != s.out) {
       s.mic = mic;
@@ -182,6 +184,8 @@ void handle(Serve& s, const json& m) {
     s.engine->setPositions(std::move(positions));
   } else if (t == "block") {
     s.engine->setBlocked(m.value("id", 0u), m.value("on", false));
+  } else if (t == "gain") {
+    s.engine->setTalkerVolume(m.value("id", 0u), m.value("value", 1.f));
   } else if (t == "devices") {
     std::vector<std::string> mics, outs;
     std::string error;

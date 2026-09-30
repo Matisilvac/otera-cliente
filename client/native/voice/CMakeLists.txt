@@ -18,16 +18,31 @@ find_path(SPEEXDSP_INCLUDE_DIR speex/speex_echo.h REQUIRED)
 find_library(SPEEXDSP_LIBRARY NAMES speexdsp libspeexdsp REQUIRED)
 find_path(MINIAUDIO_INCLUDE_DIR miniaudio.h REQUIRED)
 
+# RNNoise, the noise suppression of the "Cancelacion de ruido" option, is vendored
+# (rnnoise/README.md): its vcpkg port builds with autotools, which Windows lacks.
+add_library(rnnoise STATIC rnnoise/denoise.c rnnoise/rnn.c rnnoise/rnn_data.c rnnoise/pitch.c rnnoise/kiss_fft.c
+            rnnoise/celt_lpc.c)
+target_include_directories(rnnoise PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/rnnoise)
+if(MSVC)
+  target_compile_definitions(rnnoise PRIVATE _USE_MATH_DEFINES)
+else()
+  target_compile_options(rnnoise PRIVATE -w)
+  target_link_libraries(rnnoise PRIVATE m)
+endif()
+# Its license goes where client/voz_empaque.py and the CI look for the vcpkg ones.
+configure_file(rnnoise/COPYING ${CMAKE_BINARY_DIR}/vcpkg_installed/vendored/share/rnnoise/copyright COPYONLY)
+
 add_library(voice_core STATIC voice_dsp.cpp voice_engine.cpp voice_net.cpp miniaudio_impl.c)
 target_include_directories(voice_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${MINIAUDIO_INCLUDE_DIR} ${SPEEXDSP_INCLUDE_DIR})
 target_compile_features(voice_core PUBLIC cxx_std_17)
-target_link_libraries(voice_core PUBLIC Opus::opus ${SPEEXDSP_LIBRARY} MbedTLS::mbedcrypto Threads::Threads ${CMAKE_DL_LIBS})
+target_link_libraries(voice_core PUBLIC Opus::opus ${SPEEXDSP_LIBRARY} rnnoise MbedTLS::mbedcrypto Threads::Threads
+                      ${CMAKE_DL_LIBS})
 
 add_executable(otera-voice otera_voice.cpp voice_serve.cpp)
 target_link_libraries(otera-voice PRIVATE voice_core ixwebsocket::ixwebsocket nlohmann_json::nlohmann_json)
 
 if(WIN32)
-  set_property(TARGET voice_core otera-voice PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
+  set_property(TARGET rnnoise voice_core otera-voice PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
   target_compile_definitions(voice_core PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
   target_link_libraries(voice_core PUBLIC ws2_32 bcrypt)
   # The game launches it: no console window. wmain gets the arguments as UTF-16, so
