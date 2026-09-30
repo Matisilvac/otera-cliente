@@ -294,9 +294,13 @@ void rnn_pitch_search(const opus_val16 *x_lp, opus_val16 *y,
    celt_assert(max_pitch>0);
    lag = len+max_pitch;
 
-   opus_val16 x_lp4[len>>2];
-   opus_val16 y_lp4[lag>>2];
-   opus_val32 xcorr[max_pitch>>1];
+   /* Otera: fixed buffers instead of variable length arrays, which MSVC does not
+      compile. The only caller (denoise.c) passes len = 960 and max_pitch = 588:
+      240, 387 and 294 elements. */
+   opus_val16 x_lp4[512];
+   opus_val16 y_lp4[512];
+   opus_val32 xcorr[512];
+   celt_assert((len>>2)<=512 && (lag>>2)<=512 && (max_pitch>>1)<=512);
 
    /* Downsample by 2 again */
    for (j=0;j<len>>2;j++)
@@ -440,7 +444,9 @@ opus_val16 rnn_remove_doubling(opus_val16 *x, int maxperiod, int minperiod,
       *T0_=maxperiod-1;
 
    T = T0 = *T0_;
-   opus_val32 yy_lookup[maxperiod+1];
+   /* Otera: fixed instead of a variable length array (MSVC); maxperiod is 384 here. */
+   opus_val32 yy_lookup[512];
+   celt_assert(maxperiod+1<=512);
    dual_inner_prod(x, x, x-T0, N, &xx, &xy);
    yy_lookup[0] = xx;
    yy=xx;

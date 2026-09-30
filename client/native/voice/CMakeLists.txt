@@ -26,7 +26,9 @@ target_include_directories(rnnoise PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/rnnoise)
 if(MSVC)
   target_compile_definitions(rnnoise PRIVATE _USE_MATH_DEFINES)
 else()
-  target_compile_options(rnnoise PRIVATE -w)
+  # MSVC has no variable length arrays: the error here catches one on macOS and
+  # Linux too, instead of only in the Windows CI.
+  target_compile_options(rnnoise PRIVATE -Werror=vla -Wno-null-dereference)
   target_link_libraries(rnnoise PRIVATE m)
 endif()
 # Its license goes where client/voz_empaque.py and the CI look for the vcpkg ones.
