@@ -1,0 +1,75 @@
+diff --git a/src/framework/platform/cocoawindow.mm b/src/framework/platform/cocoawindow.mm
+index c9ef1a0..2fe3e63 100644
+--- a/src/framework/platform/cocoawindow.mm
++++ b/src/framework/platform/cocoawindow.mm
+@@ -44,6 +44,7 @@
+ #include "cocoaview.h"
+ #include <framework/core/eventdispatcher.h>
+ #include <framework/graphics/image.h>
++#include <framework/stdext/string.h>
+ 
+ CocoaWindow::CocoaWindow()
+ {
+@@ -552,9 +553,10 @@
+     @autoreleasepool {
+         NSPasteboard* pasteboard = [NSPasteboard generalPasteboard];
+         [pasteboard clearContents];
++        // Otera: widget text is latin1 (as on Windows), not UTF-8.
+         NSString* nsText = [[NSString alloc] initWithBytes:text.data()
+                                                     length:text.size()
+-                                                  encoding:NSUTF8StringEncoding];
++                                                  encoding:NSISOLatin1StringEncoding];
+         [pasteboard setString:nsText forType:NSPasteboardTypeString];
+     }
+ }
+@@ -574,7 +576,7 @@
+         NSPasteboard* pasteboard = [NSPasteboard generalPasteboard];
+         NSString* text = [pasteboard stringForType:NSPasteboardTypeString];
+         if (text) {
+-            return std::string([text UTF8String]);
++            return stdext::utf8_to_latin1([text UTF8String]);
+         }
+         return {};
+     }
+@@ -792,33 +794,15 @@
+ 
+ void CocoaWindow::handleTextInput(const std::string& text)
+ {
+-    if (text.empty()) return;
++    // Otera: Cocoa hands over UTF-8, but widgets and bitmap fonts work in latin1 (one byte
++    // per character, as win32window.cpp does). Without converting, an "ñ" entered the text
++    // edit as two bytes and was drawn and sent as "Ã±".
++    for (const char c : stdext::utf8_to_latin1(text)) {
++        m_inputEvent.reset(Fw::KeyTextInputEvent);
++        m_inputEvent.keyText = std::string(1, c);
+ 
+-    for (size_t i = 0; i < text.size(); ) {
+-        unsigned char c = text[i];
+-        int charLen = 1;
+-
+-        if ((c & 0x80) == 0) {
+-            charLen = 1;
+-        } else if ((c & 0xE0) == 0xC0) {
+-            charLen = 2;
+-        } else if ((c & 0xF0) == 0xE0) {
+-            charLen = 3;
+-        } else if ((c & 0xF8) == 0xF0) {
+-            charLen = 4;
+-        }
+-
+-        if (i + charLen <= text.size()) {
+-            std::string character = text.substr(i, charLen);
+-
+-            m_inputEvent.reset(Fw::KeyTextInputEvent);
+-            m_inputEvent.keyText = character;
+-
+-            if (m_onInputEvent)
+-                m_onInputEvent(m_inputEvent);
+-        }
+-
+-        i += charLen;
++        if (m_onInputEvent)
++            m_onInputEvent(m_inputEvent);
+     }
+ }
+ 
