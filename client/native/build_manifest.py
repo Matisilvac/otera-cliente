@@ -24,8 +24,10 @@ def main():
     # A reverse check proves the delivered source contains the complete patch.
     subprocess.run(['git', 'apply', '--reverse', '--check', str(PATCH)], cwd=args.source, check=True)
     # Game fixes applied after autowalk (the name flicker of #194, latin1 keyboard input on
-    # macOS of #390); recorded by hash.
-    game_patches = [PATCH.parent / name for name in ('otclient-4.1-name-flicker.patch', 'otclient-4.1-latin1-input.patch')]
+    # macOS of #390, the name offset of big outfits of #441, the big critical hit number of
+    # #458); recorded by hash.
+    game_patches = [PATCH.parent / name for name in ('otclient-4.1-name-flicker.patch', 'otclient-4.1-latin1-input.patch',
+                                                     'otclient-4.1-name-offset.patch', 'otclient-4.1-critical-text.patch')]
     for patch in game_patches:
         subprocess.run(['git', 'apply', '--reverse', '--check', str(patch)], cwd=args.source, check=True)
     tls_patches = [PATCH.parent / name for name in ('security-tls.patch', 'security-tls-probe.patch', 'security-tls-profile.patch')]

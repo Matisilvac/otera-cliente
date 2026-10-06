@@ -1,0 +1,65 @@
+diff --git a/src/client/creature.cpp b/src/client/creature.cpp
+index 47caf49..7fbf629 100644
+--- a/src/client/creature.cpp
++++ b/src/client/creature.cpp
+@@ -182,7 +182,9 @@ void Creature::drawInformation(const MapPosInfo& mapRect, const Point& dest, con
+     const auto displacementY = g_game.getFeature(Otc::GameNegativeOffset) ? 0 : getDisplacementY();
+ 
+     const auto& parentRect = mapRect.rect;
+-    const auto& creatureOffset = Point(16 - displacementX, -displacementY - 2) + getDrawOffset();
++    // Otera: an outfit can say where its name goes (the body of a big one is not on its tile).
++    const auto& informationOffset = m_outfit.isCreature() ? g_things.getCreatureInformationOffset(m_outfit.getId()) : Point();
++    const auto& creatureOffset = Point(16 - displacementX, -displacementY - 2) + getDrawOffset() + informationOffset;
+ 
+     Point p = dest - mapRect.drawOffset;
+     p += (creatureOffset - Point(std::round(m_jumpOffset.x), std::round(m_jumpOffset.y))) * mapRect.scaleFactor;
+diff --git a/src/client/luafunctions.cpp b/src/client/luafunctions.cpp
+index bf4c1b8..74d3dc6 100644
+--- a/src/client/luafunctions.cpp
++++ b/src/client/luafunctions.cpp
+@@ -80,6 +80,8 @@ void Client::registerLuaFunctions()
+     g_lua.bindSingletonFunction("g_things", "loadOtml", &ThingTypeManager::loadOtml, &g_things);
+     g_lua.bindSingletonFunction("g_things", "isDatLoaded", &ThingTypeManager::isDatLoaded, &g_things);
+     g_lua.bindSingletonFunction("g_things", "getDatSignature", &ThingTypeManager::getDatSignature, &g_things);
++    g_lua.bindSingletonFunction("g_things", "setCreatureInformationOffset", &ThingTypeManager::setCreatureInformationOffset, &g_things);
++    g_lua.bindSingletonFunction("g_things", "getCreatureInformationOffset", &ThingTypeManager::getCreatureInformationOffset, &g_things);
+     g_lua.bindSingletonFunction("g_things", "getContentRevision", &ThingTypeManager::getContentRevision, &g_things);
+     g_lua.bindSingletonFunction("g_things", "getThingType", &ThingTypeManager::getThingType, &g_things);
+     g_lua.bindSingletonFunction("g_things", "getThingTypes", &ThingTypeManager::getThingTypes, &g_things);
+diff --git a/src/client/thingtypemanager.h b/src/client/thingtypemanager.h
+index 8fcc9ad..7cf3b71 100644
+--- a/src/client/thingtypemanager.h
++++ b/src/client/thingtypemanager.h
+@@ -86,6 +86,24 @@ public:
+     bool isDatLoaded() { return m_datLoaded; }
+     bool isValidDatId(const uint16_t id, const ThingCategory category) const { return category < ThingLastCategory && id >= 1 && id < m_thingTypes[category].size(); }
+ 
++    // Otera: where the name and the bars of a creature go, by outfit, in map pixels from
++    // their usual place. An outfit is drawn with its bottom right corner on the tile of
++    // the creature, so the body of a big one can be far from it.
++    void setCreatureInformationOffset(const uint16_t outfit, const Point& offset)
++    {
++        if (offset.isNull())
++            m_creatureInformationOffsets.erase(outfit);
++        else
++            m_creatureInformationOffsets[outfit] = offset;
++    }
++    Point getCreatureInformationOffset(const uint16_t outfit) const
++    {
++        if (m_creatureInformationOffsets.empty())
++            return {};
++        const auto it = m_creatureInformationOffsets.find(outfit);
++        return it != m_creatureInformationOffsets.end() ? it->second : Point();
++    }
++
+ private:
+     const nlohmann::json& getCatalogContent(const std::string& file);
+     void clearCatalogContent();
+@@ -97,6 +115,7 @@ private:
+     ThingTypePtr m_nullThingType;
+ 
+     bool m_datLoaded{ false };
++    std::unordered_map<uint16_t, Point> m_creatureInformationOffsets;
+ 
+     uint32_t m_datSignature{ 0 };
+     uint16_t m_contentRevision{ 0 };

@@ -1,0 +1,160 @@
+diff --git a/src/client/animatedtext.cpp b/src/client/animatedtext.cpp
+index f645e04..57c2e65 100644
+--- a/src/client/animatedtext.cpp
++++ b/src/client/animatedtext.cpp
+@@ -27,6 +27,7 @@
+ #include "map.h"
+ #include "framework/core/eventdispatcher.h"
+ #include "framework/core/graphicalapplication.h"
++#include "framework/graphics/fontmanager.h"
+ 
+ AnimatedText::AnimatedText()
+ {
+@@ -34,8 +35,87 @@ AnimatedText::AnimatedText()
+     m_cachedText.setAlign(Fw::AlignLeft);
+ }
+ 
++namespace
++{
++    // Otera: the critical hit fonts, imported from Lua (game_textmessage): the damage
++    // font at twice and three times its size. Without them a critical is drawn as usual.
++    constexpr std::string_view CRITICAL_FONT = "otera-critico";
++    constexpr std::string_view CRITICAL_IMPACT_FONT = "otera-critico-impacto";
++    constexpr float CRITICAL_DURATION = 1.5f;   // times the duration of a normal number
++    constexpr float CRITICAL_IMPACT = 70.f;     // ms of the impact frame, in white
++    constexpr float CRITICAL_HOLD = 330.f;      // ms it stays in place, shaking
++}
++
++bool AnimatedText::isCriticalText(const std::string_view text)
++{
++    if (text.size() < 2 || text.back() != '!')
++        return false;
++    for (size_t i = 0; i + 1 < text.size(); ++i) {
++        if (text[i] < '0' || text[i] > '9')
++            return false;
++    }
++    return true;
++}
++
++void AnimatedText::setCritical()
++{
++    if (!g_fonts.fontExists(CRITICAL_FONT) || !g_fonts.fontExists(CRITICAL_IMPACT_FONT))
++        return;
++
++    std::string text = m_cachedText.getText();
++    if (!text.empty() && text.back() == '!')
++        text.pop_back();
++
++    m_cachedText.setFont(g_fonts.getFont(CRITICAL_FONT));
++    m_cachedText.setText(text);
++    m_impactText.setFont(g_fonts.getFont(CRITICAL_IMPACT_FONT));
++    m_impactText.setAlign(Fw::AlignLeft);
++    m_impactText.setText(text);
++    m_critical = true;
++}
++
++void AnimatedText::drawCritical(const Point& dest, const Rect& visibleRect)
++{
++    const float scale = g_app.getAnimatedTextScale();
++    const float tf = g_gameConfig.getAnimatedTextDuration() * CRITICAL_DURATION;
++    const float t = m_animationTimer.ticksElapsed();
++
++    const bool impact = t < CRITICAL_IMPACT;
++    auto& text = impact ? m_impactText : m_cachedText;
++    const auto& textSize = text.getTextSize();
++
++    Point p = dest;
++    p.x += (24.f / scale - (textSize.width() / 2.f));
++    // centered where a normal number is born; after the hold it rises slower
++    p.y += (16.f / scale - (textSize.height() / 2.f));
++    if (t < CRITICAL_HOLD) {
++        const float amp = t < CRITICAL_HOLD / 2 ? 3.f : 1.f;
++        p.x += (static_cast<int>(t / 40.f) % 2 ? amp : -amp);
++    } else {
++        p.y -= 34.f * scale * (t - CRITICAL_HOLD) / (tf - CRITICAL_HOLD);
++    }
++    p += m_offset;
++
++    if (!visibleRect.contains({ p, textSize }))
++        return;
++
++    p.scale(scale);
++
++    const float t0 = tf / 1.2f;
++    Color color = impact ? Color::white : m_color;
++    if (t > t0)
++        color.setAlpha(1 - (t - t0) / (tf - t0));
++
++    text.draw({ p, textSize }, color);
++}
++
+ void AnimatedText::drawText(const Point& dest, const Rect& visibleRect)
+ {
++    if (m_critical) {
++        drawCritical(dest, visibleRect);
++        return;
++    }
++
+     const float tf = g_gameConfig.getAnimatedTextDuration(),
+         tftf = g_gameConfig.getAnimatedTextDuration() * g_gameConfig.getAnimatedTextDuration();
+ 
+@@ -72,6 +152,8 @@ void AnimatedText::onAppear()
+     m_animationTimer.restart();
+ 
+     uint16_t textDuration = g_gameConfig.getAnimatedTextDuration();
++    if (m_critical)
++        textDuration = static_cast<uint16_t>(textDuration * CRITICAL_DURATION);
+     if (g_app.mustOptimize())
+         textDuration /= 2;
+ 
+@@ -81,6 +163,9 @@ void AnimatedText::onAppear()
+ 
+ bool AnimatedText::merge(const AnimatedTextPtr& other)
+ {
++    if (m_critical || other->m_critical)
++        return false;
++
+     if (other->getColor() != m_color)
+         return false;
+ 
+diff --git a/src/client/animatedtext.h b/src/client/animatedtext.h
+index 9b1b3dd..4fa816d 100644
+--- a/src/client/animatedtext.h
++++ b/src/client/animatedtext.h
+@@ -46,6 +46,11 @@ public:
+     void setText(const std::string_view text) { m_cachedText.setText(text); }
+     void setOffset(const Point& offset) { m_offset = offset; }
+ 
++    // Otera: a critical hit ("278!") is drawn big, shakes in place and rises slower.
++    static bool isCriticalText(std::string_view text);
++    void setCritical();
++    bool isCritical() const { return m_critical; }
++
+     Color getColor() { return m_color; }
+     const CachedText& getCachedText() const { return m_cachedText; }
+     Point getOffset() { return m_offset; }
+@@ -64,4 +69,8 @@ private:
+     CachedText m_cachedText;
+     Point m_offset;
+     Position m_position;
++    bool m_critical{ false };
++    CachedText m_impactText;
++
++    void drawCritical(const Point& dest, const Rect& visibleRect);
+ };
+diff --git a/src/client/protocolgameparse.cpp b/src/client/protocolgameparse.cpp
+index 4d81f4f..e02682b 100644
+--- a/src/client/protocolgameparse.cpp
++++ b/src/client/protocolgameparse.cpp
+@@ -2024,7 +2024,10 @@ void ProtocolGame::parseAnimatedText(const InputMessagePtr& msg)
+     const uint8_t color = msg->getU8();
+     const auto& text = msg->getString();
+ 
+-    g_map.addAnimatedText(std::make_shared<AnimatedText>(text, color), position);
++    const auto& animatedText = std::make_shared<AnimatedText>(text, color);
++    if (AnimatedText::isCriticalText(text))
++        animatedText->setCritical();
++    g_map.addAnimatedText(animatedText, position);
+ }
+ 
+ void ProtocolGame::parseAnthem(const InputMessagePtr& msg)
