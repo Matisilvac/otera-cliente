@@ -79,7 +79,7 @@ jobs:
           python - <<'PYTHON'
           from pathlib import Path
           import hashlib
-          for name in ['client/patches/otclient-4.1-autowalk.patch', 'client/patches/otclient-4.1-name-flicker.patch', 'client/patches/otclient-4.1-latin1-input.patch', 'otclient/src/client/tile.cpp', 'otclient/src/framework/platform/cocoawindow.mm', 'client/patches/security-tls.patch', 'client/patches/security-tls-probe.patch', 'otclient/src/client/localplayer.cpp', 'otclient/src/framework/net/connection.cpp', 'otclient/src/framework/net/connection.h', 'otclient/modules/gamelib/game.lua', 'otclient/src/main.cpp']:
+          for name in ['client/patches/otclient-4.1-autowalk.patch', 'client/patches/otclient-4.1-name-flicker.patch', 'client/patches/otclient-4.1-latin1-input.patch', 'client/patches/otclient-4.1-name-offset.patch', 'client/patches/otclient-4.1-critical-text.patch', 'otclient/src/client/tile.cpp', 'otclient/src/client/creature.cpp', 'otclient/src/client/luafunctions.cpp', 'otclient/src/client/thingtypemanager.h', 'otclient/src/client/animatedtext.cpp', 'otclient/src/client/animatedtext.h', 'otclient/src/client/protocolgameparse.cpp', 'otclient/src/framework/platform/cocoawindow.mm', 'client/patches/security-tls.patch', 'client/patches/security-tls-probe.patch', 'otclient/src/client/localplayer.cpp', 'otclient/src/framework/net/connection.cpp', 'otclient/src/framework/net/connection.h', 'otclient/modules/gamelib/game.lua', 'otclient/src/main.cpp']:
               path = Path(name)
               data = path.read_bytes()
               print(name, 'CRLF count:', data.count(b'\r\n'))
@@ -92,12 +92,16 @@ jobs:
           git apply --check ../client/patches/otclient-4.1-autowalk.patch
           git apply --check ../client/patches/otclient-4.1-name-flicker.patch
           git apply --check ../client/patches/otclient-4.1-latin1-input.patch
+          git apply --check ../client/patches/otclient-4.1-name-offset.patch
+          git apply --check ../client/patches/otclient-4.1-critical-text.patch
       - name: Patch sources
         working-directory: otclient
         run: |
           git apply ../client/patches/otclient-4.1-autowalk.patch
           git apply ../client/patches/otclient-4.1-name-flicker.patch
           git apply ../client/patches/otclient-4.1-latin1-input.patch
+          git apply ../client/patches/otclient-4.1-name-offset.patch
+          git apply ../client/patches/otclient-4.1-critical-text.patch
       - name: Apply verified TLS transport and native diagnostic
         working-directory: otclient
         shell: bash
